@@ -426,6 +426,23 @@ await ok("清单请求携带源站 Origin/Referer（修复 Cloudflare 跨源拦�
     assert.ok(/loadManifest 开始/.test(sliceFn("loadManifest")) && /fetchText\(url, referer, rt\)/.test(sliceFn("loadManifest")), "loadManifest 应把 referer 透传给 fetchText");
 });
 
+console.log("[源页面原生 fetch 过 Cloudflare（v2.9.1 根因修复）]");
+await ok("fetchViaPage：走 unsafeWindow.fetch、浏览器控制身份、默认 same-origin、可中止", () => {
+    const fv = sliceFn("fetchViaPage");
+    assert.ok(/unsafeWindow/.test(fv) && /W\.fetch/.test(fv), "必须取页面上下文的 fetch（与播放器同源同会话，才能过 CF）");
+    assert.ok(/credentials:\s*"same-origin"/.test(fv), "credentials 用默认 same-origin：跨源不带 Cookie（避免 ACAO:* 时被拦），与播放器取流一致");
+    assert.ok(/AbortController/.test(fv) && /rt\.handles\.add\(entry\)/.test(fv), "页面 fetch 也必须注册进 rt.handles 以保证任意阶段可暂停中止");
+});
+await ok("清单与 m3u8 分片都优先页面 fetch、失败才回退 GM_xhr", () => {
+    const ft = sliceFn("fetchText");
+    assert.ok(ft.indexOf("fetchViaPage") < ft.indexOf("gxhr(rt"), "fetchText 必须先试页面 fetch，再回退 GM_xhr");
+    const fc = sliceFn("fetchChunk");
+    const m3u8 = fc.split('task.type === "m3u8"')[1].split('const headers = refHeader(task)')[0];
+    assert.ok(/fetchViaPage\(rt, segUrl/.test(m3u8), "m3u8 分片应优先走页面 fetch");
+    assert.ok(m3u8.indexOf("fetchViaPage") < m3u8.indexOf("xhrWithHandle"), "分片页面 fetch 失败才回退 xhrWithHandle");
+    assert.ok(/if \(rt && rt\.abort\) throw e/.test(ft) && /if \(rt && rt\.abort\) throw e/.test(m3u8), "暂停中止时不得吞掉异常去回退，应直接上抛");
+});
+
 console.log("[跨页实时一致性]");
 await ok("estSpeed：落盘字节增长估出速度，无增长衰减，样本过期/回退重置", () => {
     const map = new Map();

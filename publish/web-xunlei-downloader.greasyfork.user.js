@@ -2,7 +2,7 @@
 // @name         Web下载器【m3u8嗅探+断点续传下载管理器】
 // @name:zh-CN   Web下载器【m3u8嗅探+断点续传下载管理器】
 // @name:en      Web Downloader - m3u8 Sniffing & Resumable Download Manager
-// @version      2.9.0
+// @version      2.9.1
 // @description  网页综合下载工具：下载主页面板、分块多线程下载、断点续传（可直写本地文件）、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:zh-CN 网页综合下载工具：下载主页面板、分块多线程下载、断点续传（可直写本地文件）、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:en A web download manager: download hub UI, multi-threaded chunked download, resume (with direct local file writing), pause/continue, task dedup, url replacement, m3u8 sniffing & merging.
@@ -11,7 +11,7 @@
 // @namespace    wtm-downloader
 // @homepageURL  https://github.com/cat-x/web-downloader
 // @supportURL   https://github.com/cat-x/web-downloader/issues
-// @icon         https://cat-x.github.io/web-downloader/icon.svg
+//  https://cat-x.github.io/web-downloader/favicon.png
 // @match        *://*/*
 // @connect      *
 // @grant        unsafeWindow
@@ -467,7 +467,7 @@
         sanitizeName: true,  // 文件名跨平台自动修正（默认开）：净化 Windows/macOS/Linux/Android 非法字符与保留名，避免无法直接保存
     };
     let settings = Object.assign({}, DEFAULT_SETTINGS);
-    const SCRIPT_VER = "2.9.0";
+    const SCRIPT_VER = "2.9.1";
     // 诊断日志：始终记入环形缓冲（dlog.buf，最近 500 条）供面板一键复制；settings.debug 只控制是否同步打到 F12 控制台
     function dlog(...args) {
         try {
@@ -624,9 +624,50 @@
     /* ---- m3u8 解析 ---- */
     /* ---- 可中止通道：有运行时一律走 xhrWithHandle，保证任何阶段都能被暂停 ---- */
     function gxhr(rt, opt) { return rt ? xhrWithHandle(rt, opt) : xhr(opt); }
+    /* 页面上下文原生 fetch：由站点自身页面发起，Origin/Sec-Fetch-* 等真实身份由浏览器控制、无法伪造，
+       与播放器取流完全同构——这是能过 Cloudflare/防盗链的关键。GM_xmlhttpRequest 从扩展后台发起，
+       这些头缺失或异常，常被判 403（老脚本 / 早期版本能下正因它用的是页面 fetch）。credentials 用默认
+       same-origin：跨源分片不带 Cookie（与播放器一致，靠 URL token 鉴权），避免 CDN 回 ACAO:* 时带 include
+       反而被浏览器拦；同源清单则照常带 Cookie。返回原生 Response。 */
+    function fetchViaPage(rt, url, init) {
+        return new Promise((resolve, reject) => {
+            const W = (typeof unsafeWindow !== "undefined" && unsafeWindow) || window;
+            const f = (W && typeof W.fetch === "function") ? W.fetch.bind(W) : null;
+            if (!f) { reject(new Error("页面上下文 fetch 不可用")); return; }
+            let settled = false;
+            const ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+            const entry = { abort() { try { ctrl && ctrl.abort(); } catch { } if (!settled) { settled = true; if (rt) rt.handles.delete(entry); reject(new Error("请求已中止")); } } };
+            if (rt) rt.handles.add(entry);
+            const opts = Object.assign({ credentials: "same-origin", cache: "no-store", redirect: "follow" }, init || {});
+            if (ctrl) opts.signal = ctrl.signal;
+            let p;
+            try { p = f(url, opts); } catch (e) { if (rt) rt.handles.delete(entry); reject(e instanceof Error ? e : new Error(String(e))); return; }
+            p.then(res => { if (settled) return; settled = true; if (rt) rt.handles.delete(entry); resolve(res); })
+             .catch(e => { if (settled) return; settled = true; if (rt) rt.handles.delete(entry); reject(e instanceof Error ? e : new Error(String(e))); });
+        });
+    }
+    function pageReferrerInit(referer) {
+        // fetch 的 referrer 仅在同源时生效；referer 与当前页同源才显式携带（异源浏览器会忽略，不影响）
+        const init = { method: "GET" };
+        if (referer) { try { const u = new URL(referer); if (u.origin === location.origin) init.referrer = referer; } catch { } }
+        return init;
+    }
     async function fetchText(url, referer, rt) {
-        // 关键：清单请求必须像分片一样携带源站 Origin/Referer（参考老脚本），否则从主页跨源发出时
-        // 默认 Origin=主页域，会被 Cloudflare 等反爬 CDN 识破拦截（表现为 loadManifest 长期挂起/403）
+        // 1) 优先页面上下文原生 fetch（同源会话，能过 Cloudflare/防盗链）
+        try {
+            const res = await fetchViaPage(rt, url, pageReferrerInit(referer));
+            if (res && res.ok) {
+                const text = await res.text();
+                if (text && text.length) return text;
+                dlog("fetchText 页面fetch空body→回退GM_xhr", String(url).slice(0, 120));
+            } else {
+                dlog("fetchText 页面fetch非2xx→回退GM_xhr", "HTTP " + (res && res.status), String(url).slice(0, 120));
+            }
+        } catch (e) {
+            if (rt && rt.abort) throw e; // 暂停中止：直接上抛
+            dlog("fetchText 页面fetch异常→回退GM_xhr", String(url).slice(0, 120), (e && e.message) || e);
+        }
+        // 2) 兜底：GM_xmlhttpRequest（扩展后台发起，无页面会话，可能被 CF 拦；保留兼容不支持跨源 fetch 的站点）
         const headers = {};
         if (referer) { try { const u = new URL(referer); headers.Origin = u.origin; headers.Referer = referer; } catch { headers.Referer = referer; } }
         let r;
@@ -740,14 +781,30 @@
     /* ---- 分片下载 ---- */
     async function fetchChunk(task, i, rt) {
         if (task.type === "m3u8") {
+            const segUrl = rt.segments[i];
+            // 1) 优先页面上下文原生 fetch（同源会话，能过 Cloudflare/防盗链）
+            try {
+                const res = await fetchViaPage(rt, segUrl, pageReferrerInit(task.referer));
+                if (res && res.ok) {
+                    const buf = await res.arrayBuffer();
+                    if (!buf || !buf.byteLength) throw new Error("空响应");
+                    return new Uint8Array(buf);
+                }
+                dlog("分片页面fetch非2xx→回退GM_xhr", i, "HTTP " + (res && res.status));
+            } catch (e) {
+                if (rt && rt.abort) throw e;         // 暂停中止：上抛由 worker 处理
+                if (e && e.message === "空响应") throw e;
+                dlog("分片页面fetch异常→回退GM_xhr", i, (e && e.message) || e);
+            }
+            // 2) 兜底：GM_xmlhttpRequest
             let r = await xhrWithHandle(rt, {
-                method: "GET", url: rt.segments[i], responseType: "arraybuffer",
+                method: "GET", url: segUrl, responseType: "arraybuffer",
                 headers: refHeader(task),
             });
             if ((r.status === 401 || r.status === 403) && task.referer) { // 部分 WAF 见跨源 Origin 头即 403：去 Origin 只留 Referer 重试一次
                 dlog("分片 403→去 Origin 重试", i, "referer=" + task.referer);
                 const h = refHeader(task); delete h.Origin;
-                r = await xhrWithHandle(rt, { method: "GET", url: rt.segments[i], responseType: "arraybuffer", headers: h });
+                r = await xhrWithHandle(rt, { method: "GET", url: segUrl, responseType: "arraybuffer", headers: h });
             }
             if (r.status < 200 || r.status >= 400) { dlog("分片失败", i, "HTTP " + r.status, "referer=" + (task.referer || "无")); throw new Error("HTTP " + r.status); }
             return new Uint8Array(r.response);
