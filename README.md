@@ -104,7 +104,7 @@ node self-test.mjs   # 15 组断言：工具函数、m3u8 解析、任务合并�
 扩展默认不注入无痕窗口，且无痕与普通窗口的存储完全隔离。需在扩展设置勾选"允许在无痕模式中使用"（但数据仍与普通窗口互不可见）。
 
 **Q：控制台怎么排查？**
-所有日志带 `[wtm]` 前缀；F12 → Console 过滤 `wtm`。异常时把输出贴到 [Issues](https://github.com/cat-x/web-downloader/issues)。
+开启调试日志：⚙ 设置勾选「调试日志」（或 Tampermonkey 菜单 🐛 开启，跨标签页同步）。开启后 F12 Console 输出 `[wtm][dbg]` 全链路决策日志（任务创建/确认面板/引擎调度/跨页命令/同步对账/转码），默认关闭零开销。错误与警告日志不受开关影响始终输出；重复安装新旧脚本时会弹“检测到另一个实例”告警。异常时把 `[wtm]` 输出贴到 [Issues](https://github.com/cat-x/web-downloader/issues)。
 
 ## 致谢与渊源
 
