@@ -11,7 +11,7 @@
 1. 打开 <https://greasyfork.org/zh-CN> → 右上角登录（可用 GitHub 账号 `cat-x` 直接授权登录，最省事）。
 2. 顶部「**我的脚本** → **导入脚本**」或「**发布您的脚本**」。
 3. 选择「**粘贴代码**」方式：
-   - 用编辑器打开 `web-downloader/publish/web-xunlei-downloader.greasyfork.user.js`，**全选复制**整份内容，粘进代码框。
+   - 用编辑器打开 `publish/web-xunlei-downloader.greasyfork.user.js`（仓库根目录下的 publish/），**全选复制**整份内容，粘进代码框。
    - 或用「从 URL 导入」临时填 GitHub raw 链接，导入后再切回编辑（注意：raw 链接导入只抓一次，之后更新仍靠你重新粘贴上传）。
 4. 按下面「二、投稿描述」把**简介 + 详细描述**填入对应字段。
 5. 「授权协议」选 **MIT**（脚本头已声明）。
@@ -95,9 +95,9 @@ Greasy Fork 会对"加载远程代码"敏感。本脚本的 **ffmpeg.wasm（MP4 
 
 ```bash
 cd /Users/mac/Documents/NewCodeSpace/tampermonkey \
-&& cp web-xunlei-downloader.user.js web-downloader/publish/web-xunlei-downloader.greasyfork.user.js \
-&& perl -0pi -e 's{^// \@downloadURL .*\n^// \@updateURL .*\n}{// \@icon         https://cat-x.github.io/web-downloader/icon.svg\n}m' web-downloader/publish/web-xunlei-downloader.greasyfork.user.js \
-&& node --check web-downloader/publish/web-xunlei-downloader.greasyfork.user.js && echo GF_READY
+&& cp web-xunlei-downloader.user.js publish/web-xunlei-downloader.greasyfork.user.js \
+&& perl -0pi -e 's{^// \@downloadURL .*\n^// \@updateURL .*\n}{// \@icon         https://cat-x.github.io/web-downloader/icon.svg\n}m' publish/web-xunlei-downloader.greasyfork.user.js \
+&& node --check publish/web-xunlei-downloader.greasyfork.user.js && echo GF_READY
 ```
 
 然后把新的 `web-xunlei-downloader.greasyfork.user.js` 全文粘到 Greasy Fork 脚本的「Code」标签保存即可（Greasy Fork 会自动识别 `@version` 变化并推送更新给订阅者）。

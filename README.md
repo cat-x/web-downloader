@@ -59,10 +59,13 @@
 
 ### 仓库结构
 
+本地工作区根目录就是本仓库（单一副本，无镜像目录）：
+
 ```
 ├── index.html                        # 主页壳页（GitHub Pages 根，纯静态零依赖）
 ├── web-xunlei-downloader.user.js     # 脚本主体（单文件，约 2000 行）
-└── self-test.mjs                     # 自动化自测（node self-test.mjs 运行）
+├── self-test.mjs                     # 自动化自测（node self-test.mjs 运行）
+└── publish/                          # Greasy Fork 投稿副本与指南（由主脚本生成）
 ```
 
 ### 架构速览（单文件内部段落顺序即执行顺序）
@@ -79,7 +82,7 @@
 ### 自测
 
 ```bash
-node self-test.mjs   # 15 组断言：工具函数、m3u8 解析、任务合并、命令过滤、abort 语义、键范围一致性等
+node self-test.mjs   # 28 组断言：工具函数、m3u8 解析、任务合并、命令过滤、abort 语义、键范围一致性、文件名净化、跨页同步等
 ```
 
 原理：从 `user.js` 源码中**按行切取真实函数**注入依赖 stub 执行，不存在测试副本与实现漂移。改完核心逻辑务必跑一遍。
@@ -90,6 +93,7 @@ node self-test.mjs   # 15 组断言：工具函数、m3u8 解析、任务合并�
 2. 递增头部 `@version`（TM 靠它判断更新）
 3. 提交并 `git push origin main`
 4. GitHub Pages 自动重建（约 30s），所有已安装用户随后自动收到更新
+5. （向 Greasy Fork 投稿时）按 `publish/GreasyFork投稿指南.md` 末尾的一行命令重生 `publish/` 副本并一并提交
 
 ### 已知平台约束（改动前必读）
 
