@@ -182,6 +182,28 @@ await ok("无遗留不可中止网络调用（运行期一律 gxhr/xhrWithHandle
     assert.equal(bad.length, 0, bad.join("\n"));
 });
 
+console.log("[调试日志开关]");
+await ok("dlog：关闭时静默，开启时输出 [wtm][dbg] 时间戳前缀", () => {
+    const body = sliceFn("dlog");
+    const make = new Function("settings", "console", body + "; return dlog;");
+    const logs = [];
+    const c = { log: (...a) => logs.push(a) };
+    let d = make({ debug: false }, c);
+    d("隐藏");
+    assert.equal(logs.length, 0, "debug=false 必须零输出");
+    d = make({ debug: true }, c);
+    d("可见", 42);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0][0], /^\[wtm\]\[dbg \d{2}:\d{2}:\d{2}\.\d{3}\]$/, "前缀格式");
+    assert.equal(logs[0][1], "可见");
+});
+await ok("debug 设置：默认关闭、UI 采集、埋点不走裸 console", () => {
+    assert.match(src, /debug:\s*false,/, "DEFAULT_SETTINGS.debug 应默认 false");
+    assert.ok(/settings\.debug = !!\(els\.sDebug/.test(src), "save-settings 应采集 debug 开关");
+    const bare = lines.filter(l => /^\s*console\.log\(/.test(l));
+    assert.ok(bare.length <= 1, `console.log 只允许 dlog 内部一处，实际 ${bare.length} 处`);
+});
+
 setTimeout(() => {
     console.log(`\n全部通过：${n} 组断言 ✅`);
 }, 50);

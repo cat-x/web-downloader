@@ -2,7 +2,7 @@
 // @name         Web迅雷【m3u8嗅探+断点续传下载管理器】
 // @name:zh-CN   Web迅雷【m3u8嗅探+断点续传下载管理器】
 // @name:en      Web Thunder - Download Manager
-// @version      2.1.0
+// @version      2.2.0
 // @description  类迅雷的网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:zh-CN 类迅雷的网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:en A Thunder-like web download manager: download hub UI, multi-threaded chunked download, resume, pause/continue, task dedup, url replacement, m3u8 sniffing & merging.
@@ -252,8 +252,15 @@
         homeUrl: "https://cat-x.github.io/web-downloader/#wtm-home", // 统一下载主页：用户自有 GitHub Pages 壳页（cat-x/web-downloader 仓库，零第三方依赖）
         saveDirName: "",     // 已授权的本地保存文件夹名（File System Access API，引擎页生效）
         convertMp4: true,    // m3u8/TS 完成后默认转封装 MP4（确认面板可改）
+        debug: false,        // 调试日志：开启后 F12 控制台输出 [wtm][dbg] 全链路决策日志（默认关，关闭时零开销）
     };
     let settings = Object.assign({}, DEFAULT_SETTINGS);
+    const SCRIPT_VER = "2.2.0";
+    // 调试日志：只依赖 settings.debug，关闭时直接 return；错误/警告日志不受此开关影响始终输出
+    function dlog(...args) {
+        if (!settings.debug) return;
+        try { console.log(`[wtm][dbg ${new Date().toISOString().slice(11, 23)}]`, ...args); } catch { }
+    }
     // 历史内置默认外壳（IANA 示例域、纯 http 的 neverssl、涂鸦用的梗站）：本地存过旧值时自动迁移到新默认
     const LEGACY_HOME_URLS = ["https://example.com/#wtm-home", "http://neverssl.com/#wtm-home", "https://motherfuckingwebsite.com/#wtm-home"];
     let tasks = [];
@@ -387,6 +394,7 @@
         return r.responseText || "";
     }
     async function loadManifest(url, referer, depth = 0, rt = null) {
+        dlog("loadManifest 开始", url.slice(0, 120), "depth=" + depth);
         const text = await fetchText(url, referer, rt);
         if (!/#EXTM3U/.test(text)) throw new Error("不是有效的 m3u8 播放列表");
         const m = parseM3U(text, url);
@@ -394,6 +402,7 @@
         if (m.playlists.length) {
             if (depth >= 3) throw new Error("m3u8 层级过深");
             const best = m.playlists.slice().sort((a, b) => b.bandwidth - a.bandwidth)[0];
+            dlog("loadManifest 多码率→选最高", best.bandwidth, best.uri.slice(0, 120));
             return await loadManifest(best.uri, referer, depth + 1, rt);
         }
         if (!m.segments.length) throw new Error("没有可下载的分片（可能是直播流已结束）");
@@ -611,13 +620,14 @@
         for (const t of tasks) {
             if (slots <= 0) break;
             if (t.status === "queued") {
-                if (rts.has(t.id)) continue; // 旧运行时还在退出中，由其 finally 末尾的 schedule 接手
-                if (ownerAlive(t)) continue; // 其它标签页已认领，不抢任务
+                if (rts.has(t.id)) { dlog("schedule 跳过", t.id, "旧运行时未退出"); continue; } // 旧运行时还在退出中，由其 finally 末尾的 schedule 接手
+                if (ownerAlive(t)) { dlog("schedule 跳过", t.id, "被其它标签页认领 owner=" + t.owner); continue; } // 其它标签页已认领，不抢任务
                 t.owner = PAGE_ID;
                 t.ownerTs = Date.now();
                 touch(t);
                 t.status = "downloading";
                 slots--;
+                dlog("schedule 启动", t.id, t.name, "engine=" + isEngine());
                 run(t);
             }
         }
@@ -633,14 +643,17 @@
 
     function sendCmd(id, action, extra) {
         const c = Object.assign({ id, action, by: PAGE_ID, ts: Date.now() }, extra || {});
+        dlog("sendCmd", action, id, "by=" + PAGE_ID);
         mgmapi.setValue("wtm-cmd", JSON.stringify(c)).catch(() => { });
     }
 
     function onCmd(raw) {
         let c;
         try { c = JSON.parse(typeof raw === "string" ? raw : JSON.stringify(raw)); } catch { return; }
-        if (!c || c.by === PAGE_ID || Date.now() - (c.ts || 0) > 60000) return; // 60s 过期：引擎可能正被后台唤起，留出启动时间
+        if (!c || c.by === PAGE_ID) return;
+        if (Date.now() - (c.ts || 0) > 60000) { dlog("onCmd 丢弃（超 60s 过期）", c.action, c.id, Date.now() - (c.ts || 0) + "ms"); return; } // 60s 过期：引擎可能正被后台唤起，留出启动时间
         const rt = rts.get(c.id);
+        dlog("onCmd 收到", c.action, c.id, "rt=" + !!rt, "engine=" + isEngine());
         if (c.action === "pause") { if (rt) abortRuntime(rt); return; }
         if (!isEngine()) return; // 以下命令涉及本地引擎运行/成品文件，仅主页处理
         if (c.action === "delete") {
@@ -666,7 +679,7 @@
         for (const r of st.list) {
             if (rts.has(r.id)) { // 本页在跑：数据本地为准，但远端“已暂停”是用户操作意图，必须执行中止
                 const lt = tasks.find(x => x.id === r.id);
-                if (r.status === "paused" && lt && (lt.status === "downloading" || lt.status === "merging")) abortRuntime(rts.get(r.id));
+                if (r.status === "paused" && lt && (lt.status === "downloading" || lt.status === "merging")) { dlog("sync 远端暂停意图→中止本地运行时", r.id); abortRuntime(rts.get(r.id)); }
                 continue;
             }
             const tomb = deletedTs.get(r.id);
@@ -686,7 +699,7 @@
             const tb = deletedTs.get(t.id);
             return !(tb && (t.updatedAt || 0) <= tb);
         });
-        if (changed) { notifyUI(); schedule(); }
+        if (changed) { dlog("sync 远端任务合并生效", st.list.length, "条"); notifyUI(); schedule(); }
     }
 
     /* 设置跨页同步：homeUrl/入口/嗅探开关变更后所有页面跟随刷新——
@@ -698,6 +711,7 @@
             if (!s) return;
             Object.assign(settings, DEFAULT_SETTINGS, s);
             if (LEGACY_HOME_URLS.includes(settings.homeUrl)) settings.homeUrl = DEFAULT_SETTINGS.homeUrl; // 旧默认外壳迁移
+            dlog("sync 设置变更应用", "homeUrl=" + settings.homeUrl, "debug=" + settings.debug);
             snifferEnabled = settings.sniff !== false;
             applyEntryVisibility();
             buildMenu();
@@ -735,6 +749,7 @@
 
     /* ==================== 对外的任务操作 ==================== */
     function addTask(spec) {
+        dlog("addTask 入口", spec.type || "auto", String(spec.url || "").slice(0, 120), "engine=" + isEngine());
         let url = String(spec.url || "").trim();
         if (!url) return null;
         try { url = new URL(url, location.href).href; } catch { mgmapi.message("链接无效"); return null; }
@@ -743,6 +758,7 @@
         // 任务排重
         const dup = tasks.find(t => t.url === url && t.type === type && t.status !== "done");
         if (dup) {
+            dlog("addTask 排重命中", dup.id, dup.name, dup.status);
             mgmapi.message(`已有相同任务：${dup.name}`);
             state.tab = "active";
             state.highlightId = dup.id;
@@ -768,6 +784,7 @@
             addedAt: Date.now(), finishedAt: 0, finalSize: 0,
         };
         tasks.push(t);
+        dlog("addTask 创建", t.id, t.name, t.status, "threads=" + t.threads, "mp4=" + t.mp4);
         state.tab = "active";
         saveTasksNow();          // 立即写入存储，供主页引擎接管
         if (isEngine()) {
@@ -786,6 +803,7 @@
         const t = findTask(id);
         if (!t) return;
         const rt = rts.get(id);
+        dlog("pauseTask", id, t.status, "rt=" + !!rt, "engine=" + isEngine());
         if (rt) { abortRuntime(rt); notifyUI(); return; } // run() 会确定性地将状态落到已暂停
         if (t.status === "done") return;
         if (["queued", "downloading", "merging"].includes(t.status)) {
@@ -800,7 +818,7 @@
     function resumeTask(id) {
         const t = findTask(id);
         if (!t) return;
-        if (rts.has(id) || ownerAlive(t)) { mgmapi.message("任务已在下载中"); return; }
+        if (rts.has(id) || ownerAlive(t)) { dlog("resumeTask 忽略（已在跑）", id); mgmapi.message("任务已在下载中"); return; }
         if (t.status === "done") return;
         t.error = "";
         setStatus(t, "queued");
@@ -983,6 +1001,7 @@
     function startConvert(id) {
         const t = findTask(id);
         if (!t) return;
+        dlog("startConvert", id, "engine=" + isEngine(), "busy=" + convertBusy.has(id));
         if (!isEngine()) { sendCmd(id, "convert"); ensureEngine(); mgmapi.message("已请求统一主页进行 MP4 转换"); return; }
         if (convertBusy.has(id) || t.converting) return;
         convertBusy.add(id);
@@ -997,6 +1016,7 @@
         convertBusy.delete(id);
         const t = findTask(id);
         if (!t) return;
+        dlog("finishConvert", id, ok ? "成功" : "失败: " + ((info && info.error) || ""));
         t.converting = false;
         if (ok) { t.mp4 = true; t.mp4Size = (info && info.size) || 0; }
         else { t.mp4 = false; t.mp4Error = (info && info.error) || "转换失败"; }
@@ -1198,7 +1218,7 @@
       </div>
       <div class="wtm-panel" id="panel">
         <div class="wtm-head">
-          <span class="wtm-logo">⚡ Web迅雷<span class="wtm-ver">v2.1</span></span>
+          <span class="wtm-logo">⚡ Web迅雷<span class="wtm-ver">v2.2</span></span>
           <span class="wtm-total" id="total">↓ 空闲</span>
           <span class="grow"></span>
           <button class="btn ghost" data-act="home" title="打开统一下载主页（固定网址，所有任务在此集中管理）">🏠 主页</button>
@@ -1221,6 +1241,7 @@
           <label class="ck"><input type="checkbox" id="s-sniff">页面资源嗅探</label>
           <label class="ck"><input type="checkbox" id="s-show-sniff">新资源自动弹出面板</label>
           <label class="ck"><input type="checkbox" id="s-fab">显示 ⚡ 悬浮球</label>
+          <label class="ck"><input type="checkbox" id="s-debug">调试日志（F12 控制台）</label>
           <label class="grow" style="flex-basis:100%">统一主页 URL <input type="text" id="s-homeurl" style="width:240px" placeholder="https://cat-x.github.io/web-downloader/#wtm-home"></label>
           <button class="btn primary mini" data-act="save-settings">保存设置</button>
         </div>
@@ -1285,7 +1306,7 @@
             cActive: q("#c-active"), cAll: q("#c-all"), cSniff: q("#c-sniff"),
             cfModal: q("#cf-modal"), cfUrl: q("#cf-url"), cfName: q("#cf-name"), cfDir: q("#cf-dir"), cfThreads: q("#cf-threads"), cfNow: q("#cf-now"), cfMp4: q("#cf-mp4"),
             sDirName: q("#s-dirname"),
-            sThreads: q("#s-threads"), sChunk: q("#s-chunk"), sConc: q("#s-conc"), sAuto: q("#s-auto"), sSniff: q("#s-sniff"), sShowSniff: q("#s-show-sniff"), sFab: q("#s-fab"), sHomeUrl: q("#s-homeurl"), sMp4: q("#s-mp4"),
+            sThreads: q("#s-threads"), sChunk: q("#s-chunk"), sConc: q("#s-conc"), sAuto: q("#s-auto"), sSniff: q("#s-sniff"), sShowSniff: q("#s-show-sniff"), sFab: q("#s-fab"), sHomeUrl: q("#s-homeurl"), sMp4: q("#s-mp4"), sDebug: q("#s-debug"),
         });
 
         bindFab();
@@ -1380,6 +1401,7 @@
             return;
         }
         const idx = sniffItems.length;
+        dlog("sniff 新资源", type, String(url).slice(0, 120));
         let path = url;
         try { path = decodeURIComponent(new URL(url).pathname); } catch { }
         sniffItems.push({ url, onDownload, type, duration, path });
@@ -1432,7 +1454,8 @@
         }
     }
     function askConfirm(spec) {
-        if (!els.cfModal) { addTask(spec); return null; } // UI 未就绪时不阻塞添加
+        if (!els.cfModal) { dlog("askConfirm UI未就绪，跳过确认直接添加", String(spec.url || "").slice(0, 120)); addTask(spec); return null; } // UI 未就绪时不阻塞添加
+        dlog("askConfirm 打开确认面板", spec.type || "", String(spec.url || "").slice(0, 120));
         let u;
         try { u = new URL(String(spec.url || "").trim(), location.href); } catch { mgmapi.message("链接无效"); return null; }
         if (!/^https?:/i.test(u.href)) { mgmapi.message("仅支持 http(s) 链接"); return null; }
@@ -1506,6 +1529,7 @@
                         settings.sniff = snifferEnabled;
                         settings.showSniff = !!els.sShowSniff.checked;
                         settings.convertMp4 = !!els.sMp4.checked;
+                        settings.debug = !!(els.sDebug && els.sDebug.checked);
                         settings.showFab = !!els.sFab.checked;
                         const hu = (els.sHomeUrl.value || "").trim();
                         if (/^https?:\/\/.+/i.test(hu) && hu.indexOf("#wtm-home") > -1) settings.homeUrl = hu;
@@ -1593,6 +1617,7 @@
                         });
                         els.cfModal.classList.remove("open");
                         pendingConfirm = null;
+                        dlog("cf-ok 用户确认", sp.name, "threads=" + sp.threads, "mp4=" + sp.mp4);
                         addTask(sp);
                         break;
                     }
@@ -1626,6 +1651,7 @@
         els.sShowSniff.checked = settings.showSniff !== false;
         els.sFab.checked = settings.showFab !== false;
         if (els.sMp4) els.sMp4.checked = settings.convertMp4 !== false;
+        if (els.sDebug) els.sDebug.checked = !!settings.debug;
         if (els.sDirName) els.sDirName.textContent = settings.saveDirName || "浏览器默认下载目录";
         els.sHomeUrl.value = settings.homeUrl;
     }
@@ -1787,7 +1813,8 @@
     async function ensureEngine() {
         try {
             const ping = await mgmapi.getValue("wtm-engine-ping", 0);
-            if (Date.now() - (+ping || 0) < 9000) return; // 已有存活的主页标签页
+            if (Date.now() - (+ping || 0) < 9000) { dlog("ensureEngine 主页存活，不重复打开"); return; } // 已有存活的主页标签页
+            dlog("ensureEngine 后台唤起主页", settings.homeUrl);
             await mgmapi.setValue("wtm-engine-ping", 0);   // 抢占一个周期，避免多标签页同时开主页
             mgmapi.openInTab(settings.homeUrl, true);      // 后台打开，不抢焦点
         } catch { }
@@ -1870,6 +1897,13 @@
         menuIds.push(GMmenu.reg("🏠 在本标签打开主页", openHomeHere));
         menuIds.push(GMmenu.reg(settings.showFab ? "🙈 隐藏页面 ⚡ 悬浮球" : "🐵 显示页面 ⚡ 悬浮球", () => setShowFab(!settings.showFab)));
         menuIds.push(GMmenu.reg(settings.showSniff ? "📡 关闭新资源自动弹出面板" : "📡 开启新资源自动弹出面板", () => setShowSniff(!settings.showSniff)));
+        menuIds.push(GMmenu.reg(settings.debug ? "🐞 关闭调试日志" : "🐛 开启调试日志", async () => {
+            settings.debug = !settings.debug;
+            await persistSettings();
+            buildMenu();
+            dlog("调试日志已开启", "v" + SCRIPT_VER, "page=" + PAGE_ID);
+            mgmapi.message(settings.debug ? "调试日志已开启：F12 控制台看 [wtm][dbg]（已同步到所有标签页）" : "调试日志已关闭");
+        }));
         menuIds.push(GMmenu.reg("🗂 打开/收起本页下载面板", () => {
             if (els.panel) togglePanel();
             else mgmapi.message("本页界面尚未就绪，请稍后再试");
@@ -1895,6 +1929,16 @@
             }
         } catch { }
         snifferEnabled = settings.sniff !== false;
+        dlog("boot", "v" + SCRIPT_VER, "page=" + PAGE_ID, "IN_FRAME=" + IN_FRAME, "home=" + isHomeRoute(), "engine=" + isEngine(), "homeUrl=" + settings.homeUrl);
+        // 重复实例检测：新旧脚本双开是常见故障源（双 UI、双引擎抢任务），同页两个实例在 unsafeWindow 上留痕互见
+        try {
+            const mark = (typeof unsafeWindow !== "undefined" && unsafeWindow) ? unsafeWindow : window;
+            if (mark.__wtm_boot && String(mark.__wtm_boot).indexOf(PAGE_ID) !== 0) {
+                console.warn("[wtm] 检测到另一个脚本实例：", mark.__wtm_boot, "本页将同时存在两套 UI/引擎，请在 Tampermonkey 中只保留一个");
+                mgmapi.message("⚠️ 本页检测到另一个 Web迅雷实例（" + mark.__wtm_boot + "），请检查是否重复安装了脚本", 10000);
+            }
+            mark.__wtm_boot = PAGE_ID + "@" + SCRIPT_VER;
+        } catch { }
         if (IN_FRAME) { // iframe：只保留嗅探+投送，不建 UI、不加载任务、不注册菜单，避免同页多实例
             const ff = (typeof GM_addValueChangeListener === "function") ? GM_addValueChangeListener
                 : ((typeof GM !== "undefined" && GM && GM.addValueChangeListener) ? GM.addValueChangeListener.bind(GM) : null);
