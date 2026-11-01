@@ -281,6 +281,34 @@ await ok("403 缓解：仅在 401/403 且带 referer 时去 Origin 重试一次"
     assert.equal(bare.length, 0, "重试仍需用可中止通道");
 });
 
+console.log("[跨页实时一致性]");
+await ok("estSpeed：落盘字节增长估出速度，无增长衰减，样本过期/回退重置", () => {
+    const map = new Map();
+    let now = 1000;
+    const est = new Function("estSamples", "Date", sliceFn("estSpeed") + "; return estSpeed;")(map, { now: () => now });
+    const t1 = { id: "x", downloaded: 0 };
+    assert.equal(est(t1), 0, "首次采样无速度");
+    now = 2000; t1.downloaded = 1000;
+    assert.equal(est(t1), 1000, "1 秒 1000 字节 → 1000B/s");
+    now = 3000;
+    assert.equal(est(t1), 700, "无增长应衰减 0.7");
+    now = 4000; t1.downloaded = 500;
+    assert.equal(est(t1), 0, "字节回退（重置）应归零");
+    now = 20000; t1.downloaded = 600;
+    assert.equal(est(t1), 0, "样本超 15 秒视为过期，重新基线");
+});
+await ok("接线：事件驱动落盘/20s 认领窗/面板快速对账/估速显示/串行写盘", () => {
+    assert.ok(/function flushProgress\(task\)/.test(src), "应有事件驱动落盘函数");
+    assert.ok(/if \(!flushProgress\(task\)\) saveTasks\(\);/.test(src), "worker 分片落地应先尝试即时写");
+    assert.ok(/flushProgress\(task\); \} \} catch/.test(src), "onprogress 回调应触发即时写");
+    assert.match(src, /t\.ownerTs < 20000/, "认领存活窗口应放宽到 20s（容忍后台节流）");
+    assert.ok(/async function pollStorageOnce\(\)/.test(src), "对账应可独立调用");
+    assert.ok(/state\.panelOpen\) startFastPoll\(\); else stopFastPoll\(\)/.test(src), "面板开启应启动 1.2s 快速对账");
+    assert.ok(/pollStorageOnce\(\); \/\/ 打开即取最新存储/.test(src), "openPanel 应立即对账");
+    assert.ok(/estSpeeds\.get\(t\.id\)/.test(src), "taskHtml 速度应回退到估算值");
+    assert.ok(/saveChain = saveChain\.then\(doSaveTasksNow\)/.test(src), "落盘必须串行防交错");
+});
+
 setTimeout(() => {
     console.log(`\n全部通过：${n} 组断言 ✅`);
 }, 50);

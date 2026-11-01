@@ -2,7 +2,7 @@
 // @name         Web迅雷【m3u8嗅探+断点续传下载管理器】
 // @name:zh-CN   Web迅雷【m3u8嗅探+断点续传下载管理器】
 // @name:en      Web Thunder - Download Manager
-// @version      2.4.1
+// @version      2.5.0
 // @description  类迅雷的网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:zh-CN 类迅雷的网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:en A Thunder-like web download manager: download hub UI, multi-threaded chunked download, resume, pause/continue, task dedup, url replacement, m3u8 sniffing & merging.
@@ -320,7 +320,7 @@
         sanitizeName: true,  // 文件名跨平台自动修正（默认开）：净化 Windows/macOS/Linux/Android 非法字符与保留名，避免无法直接保存
     };
     let settings = Object.assign({}, DEFAULT_SETTINGS);
-    const SCRIPT_VER = "2.4.1";
+    const SCRIPT_VER = "2.5.0";
     // 调试日志：只依赖 settings.debug，关闭时直接 return；错误/警告日志不受此开关影响始终输出
     function dlog(...args) {
         if (!settings.debug) return;
@@ -372,8 +372,14 @@
         if (saveTimer) return;
         saveTimer = setTimeout(() => { saveTimer = null; saveTasksNow(); }, 500);
     }
-    async function saveTasksNow() {
+    // 落盘串行链：进度驱动的高频即时写入，不允许读-合并-写交错
+    let saveChain = Promise.resolve();
+    function saveTasksNow() {
         if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+        saveChain = saveChain.then(doSaveTasksNow).catch(() => { });
+        return saveChain;
+    }
+    async function doSaveTasksNow() {
         try {
             const remote = parseStored(await mgmapi.getValue("wtm-tasks", ""));
             const localPruned = tasks.filter(t => {
@@ -386,6 +392,19 @@
             lastPolledTasksRaw = raw; // 自己写的，对账轮询不必再处理
             await mgmapi.setValue("wtm-tasks", raw);
         } catch (e) { console.warn("[wtm] save tasks failed", e); }
+    }
+    /* 事件驱动落盘：后台标签页的定时器会被浏览器节流（心跳/节流写可能几十秒才跑一次），
+       而下载的网络回调不受影响——分片落地/进度回调时即时写盘并续认领时间，
+       其它标签页才能实时看到进度、且不会把活着的属主误判为已死 */
+    let lastFlushTs = 0;
+    function flushProgress(task) {
+        const now = Date.now();
+        if (now - lastFlushTs < 800) return false;
+        lastFlushTs = now;
+        task.ownerTs = now;
+        touch(task);
+        saveTasksNow();
+        return true;
     }
 
     /* ==================== 下载引擎 ==================== */
@@ -562,7 +581,7 @@
         }
         let r = await xhrWithHandle(rt, {
             method: "GET", url: task.url, headers, responseType: "arraybuffer",
-            onprogress: ev => { try { if (ev && ev.lengthComputable) rt.live.set(i, Math.min(ev.loaded, task.resumable ? task.chunkSize : (task.totalSize || ev.loaded))); } catch { } },
+            onprogress: ev => { try { if (ev && ev.lengthComputable) { rt.live.set(i, Math.min(ev.loaded, task.resumable ? task.chunkSize : (task.totalSize || ev.loaded))); flushProgress(task); } } catch { } },
         });
         rt.live.delete(i);
         if ((r.status === 401 || r.status === 403) && headers.Origin && task.referer) { // 同上：403 时去 Origin 重试
@@ -588,7 +607,7 @@
                     task.downloaded += blob.size;
                     task.doneCount = (task.doneCount || 0) + 1;
                     touch(task);
-                    saveTasks();
+                    if (!flushProgress(task)) saveTasks();
                     ok = true;
                     break;
                 } catch (e) {
@@ -712,8 +731,8 @@
     }
 
     /* ---- 跨标签页同步与命令通道 ---- */
-    function ownerAlive(t) {
-        return !!(t && t.owner && t.owner !== PAGE_ID && t.ownerTs && (Date.now() - t.ownerTs < 8000)
+    function ownerAlive(t) { // 配合 flushProgress 事件驱动续期，窗口放宽到 20s，容忍后台页定时器被节流后的写入空档
+        return !!(t && t.owner && t.owner !== PAGE_ID && t.ownerTs && (Date.now() - t.ownerTs < 20000)
             && (t.status === "downloading" || t.status === "merging"));
     }
 
@@ -796,6 +815,25 @@
         } catch { }
     }
     
+    /* 存储对账一次：GM 事件可能丢，定时比对存储原文自愈（也供面板打开时立即取最新） */
+    let lastCmdRaw = "", lastSniffRaw = "";
+    async function pollStorageOnce() {
+        try {
+            const tr = await mgmapi.getValue("wtm-tasks", "");
+            if (tr && tr !== lastPolledTasksRaw) { lastPolledTasksRaw = tr; onRemoteTasksUpdate(tr); }
+            const cr = await mgmapi.getValue("wtm-cmd", "");
+            if (cr && cr !== lastCmdRaw) { lastCmdRaw = cr; onCmd(cr); }
+            const sr = await mgmapi.getValue("wtm-sniff-in", "");
+            if (sr && sr !== lastSniffRaw) { lastSniffRaw = sr; onSniffRelay(sr); }
+            const usr = await mgmapi.getValue("wtm-settings", "");
+            if (usr && usr !== lastSettingsRaw) { lastSettingsRaw = usr; applyRemoteSettings(usr); }
+        } catch { }
+    }
+    // 面板打开时快速对账（1.2s）：保证哪个页面打开面板，看到的内容/进度都一致；关闭后停回 4s
+    let fastPoll = null;
+    function startFastPoll() { if (!fastPoll) fastPoll = setInterval(pollStorageOnce, 1200); }
+    function stopFastPoll() { if (fastPoll) { clearInterval(fastPoll); fastPoll = null; } }
+    
     function watchStorage() {
         const f = (typeof GM_addValueChangeListener === "function") ? GM_addValueChangeListener
             : ((typeof GM !== "undefined" && GM && GM.addValueChangeListener) ? GM.addValueChangeListener.bind(GM) : null);
@@ -808,19 +846,7 @@
             } catch { }
         }
         // 对账兜底：无论监听是否可用都定时比对存储，自愈错过的事件（监听器本身丢事件是常见bug）
-        let lastCmdRaw = "", lastSniffRaw = "";
-        setInterval(async () => {
-            try {
-                const tr = await mgmapi.getValue("wtm-tasks", "");
-                if (tr && tr !== lastPolledTasksRaw) { lastPolledTasksRaw = tr; onRemoteTasksUpdate(tr); }
-                const cr = await mgmapi.getValue("wtm-cmd", "");
-                if (cr && cr !== lastCmdRaw) { lastCmdRaw = cr; onCmd(cr); }
-                const sr = await mgmapi.getValue("wtm-sniff-in", "");
-                if (sr && sr !== lastSniffRaw) { lastSniffRaw = sr; onSniffRelay(sr); }
-                const usr = await mgmapi.getValue("wtm-settings", "");
-                if (usr && usr !== lastSettingsRaw) { lastSettingsRaw = usr; applyRemoteSettings(usr); }
-            } catch { }
-        }, 4000);
+        setInterval(pollStorageOnce, 4000);
     }
 
     /* ==================== 对外的任务操作 ==================== */
@@ -1470,6 +1496,7 @@
         if (!els.panel) return;
         state.panelOpen = true;
         hideSniffPop(); // 开大面板时收起嗅探小窗，避免两个窗体叠加
+        pollStorageOnce(); // 打开即取最新存储：不等轮询，其它页的任务/进度立即可见
         els.panel.classList.add("open");
         if (max && !state.maximized) toggleMax();
         fillSettings();
@@ -1841,7 +1868,7 @@
         if (t.status === "done") pct = 100;
         else if (t.type === "m3u8") pct = t.totalChunks ? (t.doneCount || 0) / t.totalChunks * 100 : 0;
         else if (t.totalSize > 0) pct = Math.min(100, (t.downloaded + live) / t.totalSize * 100);
-        const speed = rt ? rt.speed : 0;
+        const speed = rt ? rt.speed : (estSpeeds.get(t.id) || 0); // 非本页任务用落盘采样估算速度
 
         let sizeTxt;
         if (t.status === "done") sizeTxt = fmtSize(t.finalSize || t.downloaded);
@@ -1926,6 +1953,21 @@
     }
 
     /* ---- 速度统计 ---- */
+    /* 其它标签页在跑的任务：本页没有本地运行时，用落盘 downloaded 采样估算速度，
+       保证任意页面打开面板都能看到速度/剩余时间在变化，而不是一根死进度条 */
+    const estSamples = new Map(); // id -> {ts, bytes, speed}
+    const estSpeeds = new Map();  // id -> 当前估算速度（taskHtml/总速读取）
+    function estSpeed(t) {
+        const now = Date.now();
+        const bytes = t.downloaded || 0;
+        const p = estSamples.get(t.id);
+        if (!p || now - p.ts > 15000 || bytes < p.bytes) { estSamples.set(t.id, { ts: now, bytes, speed: 0 }); return 0; }
+        let sp = p.speed;
+        if (bytes > p.bytes) { const dt = (now - p.ts) / 1000; if (dt > 0.2) sp = (bytes - p.bytes) / dt; }
+        else sp = sp * 0.7; // 无增长时衰减，逐步归零
+        estSamples.set(t.id, { ts: now, bytes, speed: sp });
+        return sp;
+    }
     function tickSpeed() {
         const now = Date.now();
         let total = 0;
@@ -1941,6 +1983,16 @@
             }
             if (t.status === "downloading") total += rt.speed;
         }
+        // 非本页运行的下载中任务：按落盘采样估速并计入总速，各标签页面板显示一致
+        for (const t of tasks) {
+            if (rts.has(t.id)) { estSamples.delete(t.id); estSpeeds.delete(t.id); continue; }
+            if (t.status === "downloading" || t.status === "merging") {
+                const sp = estSpeed(t);
+                estSpeeds.set(t.id, sp);
+                if (t.status === "downloading") total += sp;
+            } else { estSamples.delete(t.id); estSpeeds.delete(t.id); }
+        }
+        if (state.panelOpen) startFastPoll(); else stopFastPoll(); // 面板开着就 1.2s 对账一次
         // 引擎页每 2 秒把实时进度落盘，所有标签页/主页都能看到速度
         if (isEngine() && rts.size && now - lastPersist > 2000) { lastPersist = now; saveTasksNow(); }
         if (els.total) els.total.textContent = "↓ " + fmtSpeed(total);
