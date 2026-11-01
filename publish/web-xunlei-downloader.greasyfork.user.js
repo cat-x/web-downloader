@@ -2,7 +2,7 @@
 // @name         Web下载器【m3u8嗅探+断点续传下载管理器】
 // @name:zh-CN   Web下载器【m3u8嗅探+断点续传下载管理器】
 // @name:en      Web Downloader - m3u8 Sniffing & Resumable Download Manager
-// @version      2.8.2
+// @version      2.9.0
 // @description  网页综合下载工具：下载主页面板、分块多线程下载、断点续传（可直写本地文件）、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:zh-CN 网页综合下载工具：下载主页面板、分块多线程下载、断点续传（可直写本地文件）、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:en A web download manager: download hub UI, multi-threaded chunked download, resume (with direct local file writing), pause/continue, task dedup, url replacement, m3u8 sniffing & merging.
@@ -467,7 +467,7 @@
         sanitizeName: true,  // 文件名跨平台自动修正（默认开）：净化 Windows/macOS/Linux/Android 非法字符与保留名，避免无法直接保存
     };
     let settings = Object.assign({}, DEFAULT_SETTINGS);
-    const SCRIPT_VER = "2.8.2";
+    const SCRIPT_VER = "2.9.0";
     // 诊断日志：始终记入环形缓冲（dlog.buf，最近 500 条）供面板一键复制；settings.debug 只控制是否同步打到 F12 控制台
     function dlog(...args) {
         try {
@@ -947,26 +947,28 @@
         }
     }
 
-    /* ---- 调度器：并发任务数控制（只调度不属于其它存活标签页的任务） ---- */
+    /* ---- 调度器：并发任务数控制（只调度与本页同源、且未被其它存活标签页认领的任务） ---- */
     function schedule() {
-        if (!isEngine()) { notifyUI(); return; } // 下载引擎仅在主标签页运行
         let active = tasks.filter(t => (t.status === "downloading" || t.status === "merging") && rts.has(t.id)).length;
         let slots = Math.max(0, settings.concurrency - active);
+        let claimed = false;
         for (const t of tasks) {
             if (slots <= 0) break;
             if (t.status === "queued") {
+                if (!canRunHere(t)) continue; // 下载只在任务来源同域页面执行，其它页面/主页只读总览
                 if (rts.has(t.id)) { dlog("schedule 跳过", t.id, "旧运行时未退出"); continue; } // 旧运行时还在退出中，由其 finally 末尾的 schedule 接手
-                if (ownerAlive(t)) { dlog("schedule 跳过", t.id, "被其它标签页认领 owner=" + t.owner); continue; } // 其它标签页已认领，不抢任务
+                if (ownerAlive(t)) { dlog("schedule 跳过", t.id, "被其它同源标签页认领 owner=" + t.owner); continue; } // 同源另一标签页已认领，不抢任务
                 t.owner = PAGE_ID;
                 t.ownerTs = Date.now();
                 touch(t);
                 t.status = "downloading";
                 slots--;
-                dlog("schedule 启动", t.id, t.name, "engine=" + isEngine());
+                claimed = true;
+                dlog("schedule 启动", t.id, t.name, "origin=" + t.origin);
                 run(t);
             }
         }
-        saveTasks();
+        if (claimed || tasks.some(canRunHere)) saveTasks(); // 只读页不回写，避免覆盖来源页的下载进度
         notifyUI();
     }
 
@@ -990,18 +992,18 @@
         const rt = rts.get(c.id);
         dlog("onCmd 收到", c.action, c.id, "rt=" + !!rt, "engine=" + isEngine());
         if (c.action === "pause") { if (rt) abortRuntime(rt); return; }
-        if (!isEngine()) return; // 以下命令涉及本地引擎运行/成品文件，仅主页处理
+        const ot = findTask(c.id);
+        if (!(ot && canRunHere(ot)) && !rt) return; // 只有与任务同源的页面能操作其本地运行/成品文件
         if (c.action === "delete") {
             if (rt) abortRuntime(rt);
             removeTask(c.id, true);
         } else if (c.action === "changeUrl") {
             if (rt) abortRuntime(rt);
-            const t = findTask(c.id);
-            if (t) { mgmapi.message(`已更新任务「${t.name}」地址并从断点续传`); applyUrlChange(t, c.url); }
+            if (ot) { mgmapi.message(`已更新任务「${ot.name}」地址并从断点续传`); applyUrlChange(ot, c.url); }
         } else if (c.action === "saveAs") {
             saveAsInternal(c.id).then(rec => { if (rec) mgmapi.message(`已开始下载：${rec.name}`); }).catch(e => mgmapi.message("另存失败：" + e.message));
         } else if (c.action === "convert") {
-            startConvert(c.id); // 其它页面请求转 MP4：成品只存在主页域，由引擎执行
+            startConvert(c.id); // 转 MP4 需读同源域的成品文件，仅来源页面执行
         }
     }
 
@@ -1119,7 +1121,7 @@
             threads: clamp(parseInt(spec.threads) || 0, 0, 8), // 每任务独立线程数，0=跟随全局默认
             status: spec.startNow === false ? "paused" : "queued", // 确认面板可选“稍后开始（排队）”
             mp4: !!spec.mp4, converting: false, mp4Error: "", // 转封装 MP4 选项与状态
-            owner: "", ownerTs: 0, origin: "", updatedAt: Date.now(),
+            owner: "", ownerTs: 0, origin: location.origin, updatedAt: Date.now(), // 任务绑定创建页的域：只有同域页面能跑它
             totalSize: 0, chunkSize: 0, totalChunks: 0,
             downloaded: 0, doneCount: 0,
             planned: false, resumable: false, singleBlob: false,
@@ -1130,15 +1132,9 @@
         tasks.push(t);
         dlog("addTask 创建", t.id, t.name, t.status, "threads=" + t.threads, "mp4=" + t.mp4);
         state.tab = "active";
-        saveTasksNow();          // 立即写入存储，供主页引擎接管
-        if (isEngine()) {
-            schedule();
-            if (spec.silent !== true) openPanel();
-        } else {
-            ensureEngine();      // 确保统一主页标签页存在（后台打开），由其引擎接管执行
-            mgmapi.message(`已加入统一下载主页队列：${t.name}`);
-            if (spec.silent !== true) openPanel();
-        }
+        saveTasksNow();          // 写入共享存储：来源同域页立即执行，主页与其它页面同步为只读总览
+        schedule();              // 就在当前页面（资源所在站点域）开始下载——网络身份与站点播放器一致，可通过防盗链/Cloudflare
+        if (spec.silent !== true) openPanel();
         notifyUI();
         return t;
     }
@@ -1166,16 +1162,15 @@
         if (t.status === "done") return;
         t.error = "";
         setStatus(t, "queued");
-        if (isEngine()) schedule();
-        else ensureEngine(); // 确保引擎标签页存在，否则“继续”只是排队没人干活
+        if (canRunHere(t)) schedule();
+        else ensureSourceTab(t); // 任务属于其它站点：本页面无法代发其请求，打开来源页由其继续下载
     }
 
     async function removeTask(id, fromCmd) {
         const t = findTask(id);
         if (!t) return;
-        const remote = !fromCmd && ownerAlive(t);
         abortRuntime(rts.get(id));
-        if (remote) sendCmd(id, "delete");
+        if (!fromCmd) sendCmd(id, "delete"); // 广播删除：同源的其它标签页据此清理本地成品与直写文件
         deletedTs.set(id, Date.now()); // 墓碑：所有标签页同步删除
         tasks = tasks.filter(x => x.id !== id);
         try { await Store.clearChunks(t.id); await Store.clearPlans(t.id); } catch { }
@@ -1204,8 +1199,8 @@
         if (t.type === "m3u8") t.planned = false;
         t.error = "";
         setStatus(t, "queued");
-        if (isEngine()) schedule();
-        else ensureEngine(); // 换址续传同样需要引擎在场
+        if (canRunHere(t)) schedule();
+        else ensureSourceTab(t); // 换址续传须在来源同域页执行
     }
 
     function changeUrl(id, newUrl) {
@@ -1241,7 +1236,7 @@
                     }
                 } catch (e) { dlog("saveAs 本地成品检测失败", e && e.message); }
             }
-            throw new Error("成品文件不存在，请在统一主页重新下载");
+            throw new Error("成品文件不存在，请在来源站点页面重新下载");
         }
         if (t.mp4) { // 已转封装：另存直接用 MP4 成品
             const mrec = await Store.getFile("mp4:" + t.id);
@@ -1276,7 +1271,7 @@
     async function saveAs(id) {
         const t = findTask(id);
         if (!t) return;
-        if (!isEngine()) { sendCmd(id, "saveAs"); ensureEngine(); mgmapi.message("已请求统一主页开始下载该文件"); return; }
+        if (!canRunHere(t)) { sendCmd(id, "saveAs"); ensureSourceTab(t); return; } // 成品在来源域，交由同源页面另存
         return saveAsInternal(id);
     }
 
@@ -1367,7 +1362,7 @@
         const t = findTask(id);
         if (!t) return;
         dlog("startConvert", id, "engine=" + isEngine(), "busy=" + convertBusy.has(id));
-        if (!isEngine()) { sendCmd(id, "convert"); ensureEngine(); mgmapi.message("已请求统一主页进行 MP4 转换"); return; }
+        if (!canRunHere(t)) { sendCmd(id, "convert"); ensureSourceTab(t); return; } // 转封装读的是本域成品，须在同源页面进行
         if (convertBusy.has(id) || t.converting) return;
         convertBusy.add(id);
         t.converting = true; t.mp4Error = "";
@@ -1677,7 +1672,7 @@
           <div class="crow"><span class="clb">线程数</span><input type="number" id="cf-threads" min="1" max="8" style="flex:none;width:72px"><span class="clb" style="width:auto">立即开始</span><input type="checkbox" id="cf-now"></div>
           <div class="crow"><span class="clb" style="width:auto"><input type="checkbox" id="cf-mp4"> 完成后转 MP4</span><span class="cnote" style="margin-top:0">无损重封装（-c copy）；首次使用联网加载组件，失败不影响 TS 成品</span></div>
           <div class="crow"><span class="clb" style="width:auto"><input type="checkbox" id="cf-sanitize"> 文件名跨平台自动修正</span><span class="cnote" style="margin-top:0">取消则按原名保存（可能含目标系统非法字符无法保存）</span></div>
-          <div class="cnote">超过并发数的任务会自动排队；取消勾选「立即开始」则放入暂停列表，稍后手动继续。「更改文件夹」在本页直接打开选择器（需 Chrome/Edge，https 页面）：在主页授权后新任务分片直接写入该文件夹（先建占位文件、边下边写、完成改名，不占浏览器缓存）；注意浏览器禁止直接选中「下载/桌面/文稿」本身，请在其中建子文件夹再选。</div>
+          <div class="cnote">超过并发数的任务会自动排队；取消勾选「立即开始」则放入暂停列表，稍后手动继续。「更改文件夹」在本页直接打开选择器（需 Chrome/Edge，https 页面）：在当前站点授权后，本站新任务分片直接写入该文件夹（先建占位文件、边下边写、完成改名，不占浏览器缓存；各站点分别记住自己的文件夹）；注意浏览器禁止直接选中「下载/桌面/文稿」本身，请在其中建子文件夹再选。</div>
           <div class="cfoot"><button class="btn ghost" data-act="cf-cancel">取消</button><button class="btn primary" data-act="cf-ok">开始下载</button></div>
         </div>
       </div>`;
@@ -2208,9 +2203,11 @@
             }
         } else if (t.status === "queued") extra = " · 等待任务槽位";
         else if (t.status === "error" && t.error) extra = ` · ${t.error}`;
-        if (ownerAlive(t)) extra += " · 由其它标签页处理中";
-        else if (t.origin && t.origin !== location.origin && t.downloaded > 0 && t.status !== "done")
-            extra += " · 断点缓存在其它站点域名，继续下载将重新拉取";
+        if (ownerAlive(t)) extra += " · 由其它同源标签页处理中";
+        else if (t.origin && t.origin !== location.origin && t.status !== "done") {
+            let host = ""; try { host = new URL(t.origin).host; } catch { }
+            extra += ` · 需在来源站点${host ? `「${host}」` : ""}页面下载`;
+        }
         if (t.converting) extra += " · MP4 转换中…";
         else if (t.mp4) extra += " · 已转 MP4";
         else if (t.mp4Error && tsLike(t)) extra += " · MP4 转换失败，可点按钮重试";
@@ -2335,8 +2332,19 @@
         const hu = settings.homeUrl || DEFAULT_SETTINGS.homeUrl;
         return location.hash.indexOf("wtm-home") > -1 && sameBase(location.href, hu);
     }
-    // 下载引擎只在主页标签页运行：所有分片统一缓存在主页域，跨站点续传一致
+    // 主页路由判定（仅用于全屏样式与自动续传触发）；下载不再集中于主页，而是回到任务来源同域页执行
     function isEngine() { return isHomeRoute(); }
+    // 下载在“任务来源同域页面”执行：只有与任务 origin 同域（origin === 当前页 origin）的页面才能运行它，
+    // 使网络请求携带来源站点的 referer/origin/Cookie/会话，能通过防盗链与 Cloudflare；主页与其它页只作只读总览。
+    function canRunHere(t) { return !!t && t.origin === location.origin; }
+    async function ensureSourceTab(t) {
+        // 任务属于其它站点：本页面无法代发其下载请求。打开其来源页（referer），由该同域标签页认领续跑。
+        const target = (t && (t.referer || t.url)) || "";
+        let host = "";
+        try { host = new URL((t && t.origin) || target).host; } catch { }
+        mgmapi.message(`该任务需在来源站点${host ? `「${host}」` : ""}的页面下载，正在为你打开来源页`, 6000);
+        if (target) { try { mgmapi.openInTab(target, false); } catch { } }
+    }
 
     async function ensureEngine() {
         try {
@@ -2363,7 +2371,7 @@
                 homeResumed = true;
                 let n = 0;
                 tasks.forEach(t => {
-                    if (t.status === "paused") { t.status = "queued"; n++; }
+                    if (t.status === "paused" && canRunHere(t)) { t.status = "queued"; n++; }
                 });
                 if (n) { saveTasks(); schedule(); mgmapi.message(`主页已自动续传 ${n} 个任务`); }
             }
@@ -2486,7 +2494,7 @@
         for (const t of tasks) {
             if (["downloading", "queued", "merging"].includes(t.status)) {
                 if (ownerAlive(t)) continue;
-                t.status = (isHomeRoute() && settings.autoResumeOnHome) ? "queued" : "paused";
+                t.status = (canRunHere(t) && settings.autoResumeOnHome) ? "queued" : "paused";
                 if (t.type === "m3u8") t.planned = false;
             }
         }
@@ -2502,9 +2510,10 @@
             if (d && d.wtm === "mp4-result") finishConvert(d.taskId, !!d.ok, d);
         });
         tasks.forEach(t => { t.converting = false; }); // 刷新时清理半途而废的转换标记
-        if (isEngine()) { // 主页引擎标签页：广播存活心跳，供其它页面判断是否需要自动打开主页
+        // 每个站点页面都可能是自己任务的下载引擎：无条件恢复本域已授权的保存文件夹（直写按域名各存各的）
+        try { const m = await Store.getMeta("savedir"); if (m && m.value) { dirHandle = m.value; settings.saveDirName = m.value.name || settings.saveDirName; } } catch { }
+        if (isEngine()) { // 主页路由心跳（保留兼容；下载已不再集中于主页）
             setInterval(() => { try { mgmapi.setValue("wtm-engine-ping", Date.now()); } catch { } }, 3000);
-            try { const m = await Store.getMeta("savedir"); if (m && m.value) { dirHandle = m.value; settings.saveDirName = m.value.name || settings.saveDirName; } } catch { } // 恢复保存文件夹授权
         }
         buildMenu(); // Tampermonkey 图标菜单/右键菜单入口
         setInterval(schedule, 2500);

@@ -298,6 +298,35 @@ await ok("planM3U8：先置 resumable/chunkSize/name 再 openPlan（旧顺序导
     assert.ok(/rt\.nextWrite = 0; while \(doneIdx\.has\(rt\.nextWrite\)\)/.test(sliceFn("run")), "续传时 m3u8 从第一个未完成分片接着刷盘");
 });
 
+console.log("[源页面直接下载（架构反转）]");
+await ok("下载只认任务同源页：调度/投递/续传/另存/转码均按 canRunHere，不再强制交给主页", () => {
+    const sc = sliceFn("schedule");
+    assert.ok(/if \(!canRunHere\(t\)\) continue;/.test(sc), "schedule 应跳过非同源任务");
+    assert.ok(!/if \(!isEngine\(\)\) \{ notifyUI\(\); return; \}/.test(sc), "schedule 不应再有『仅主页运行』总闸");
+    assert.ok(/if \(claimed \|\| tasks\.some\(canRunHere\)\) saveTasks\(\)/.test(sc), "只读页不回写任务表，避免覆盖来源页进度");
+    const at = sliceFn("addTask");
+    assert.ok(/origin: location\.origin/.test(at), "任务创建即绑定当前页域");
+    assert.ok(/schedule\(\);/.test(at) && !/ensureEngine\(\)/.test(at), "addTask 就在当前页调度，不再后台唤起主页");
+    assert.ok(!/加入统一下载主页队列/.test(src), "不再有『交给主页队列』的旧文案");
+    for (const fn of ["resumeTask", "applyUrlChange"]) {
+        const b = sliceFn(fn);
+        assert.ok(/if \(canRunHere\(t\)\) schedule\(\);/.test(b), fn + " 应仅同源页本地调度");
+        assert.ok(/else ensureSourceTab\(t\);/.test(b), fn + " 他源任务应打开来源页");
+        assert.ok(!/ensureEngine\(\)/.test(b), fn + " 不再唤起主页引擎");
+    }
+    assert.ok(/if \(!canRunHere\(t\)\) \{ sendCmd\(id, "saveAs"\); ensureSourceTab\(t\); return; \}/.test(sliceFn("saveAs")), "saveAs 他源任务转交来源页");
+    assert.ok(/if \(!canRunHere\(t\)\) \{ sendCmd\(id, "convert"\); ensureSourceTab\(t\); return; \}/.test(sliceFn("startConvert")), "convert 他源任务转交来源页");
+    const oc = sliceFn("onCmd");
+    assert.ok(/if \(!\(ot && canRunHere\(ot\)\) && !rt\) return;/.test(oc), "onCmd 引擎动作只认同源页");
+    assert.ok(!/if \(!isEngine\(\)\) return;/.test(oc), "onCmd 不再有『仅主页处理』硬闸");
+    assert.ok(/function canRunHere\(t\) \{ return !!t && t\.origin === location\.origin; \}/.test(src), "canRunHere 以 origin 判定归属");
+    assert.ok(/openInTab\(target, false\)/.test(sliceFn("ensureSourceTab")), "ensureSourceTab 打开来源(referer)页");
+});
+await ok("保存文件夹句柄每页无条件恢复（各站直写各存），不再只在主页读取", () => {
+    assert.ok(!/if \(isEngine\(\)\) \{[^}]*getMeta\("savedir"\)/.test(src), "savedir 恢复不应被包在 isEngine 块内");
+    assert.ok(/getMeta\("savedir"\)/.test(src), "仍应恢复已授权的保存文件夹句柄");
+});
+
 console.log("[动态文件名取名]");
 await ok("looksLikeMeaningfulFile：真实文件名判定为有意义，流媒体占位名判定为无意义", () => {
     assert.equal(F.looksLikeMeaningfulFile("权力的游戏S01E01.mp4"), true, "真实片名应优先用 URL 名");
