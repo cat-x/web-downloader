@@ -427,11 +427,13 @@ await ok("清单请求携带源站 Origin/Referer（修复 Cloudflare 跨源拦�
 });
 
 console.log("[源页面原生 fetch 过 Cloudflare（v2.9.1 根因修复）]");
-await ok("fetchViaPage：走 unsafeWindow.fetch、浏览器控制身份、默认 same-origin、可中止", () => {
+await ok("fetchViaPage：走 unsafeWindow.fetch、先 include 后自动降级 omit、可中止", () => {
     const fv = sliceFn("fetchViaPage");
     assert.ok(/unsafeWindow/.test(fv) && /W\.fetch/.test(fv), "必须取页面上下文的 fetch（与播放器同源同会话，才能过 CF）");
-    assert.ok(/credentials:\s*"same-origin"/.test(fv), "credentials 用默认 same-origin：跨源不带 Cookie（避免 ACAO:* 时被拦），与播放器取流一致");
+    assert.ok(/doOnce\("include"\)/.test(fv) && /doOnce\("omit"\)/.test(fv), "凭据不赌单一方向：先带 Cookie(include)，被拦再降级 omit");
+    assert.ok(/credentials:\s*cred/.test(fv), "单次 fetch 的 credentials 由传入策略控制（include/omit）");
     assert.ok(/AbortController/.test(fv) && /rt\.handles\.add\(entry\)/.test(fv), "页面 fetch 也必须注册进 rt.handles 以保证任意阶段可暂停中止");
+    assert.ok(/if \(rt && rt\.abort\) throw/.test(fv), "暂停中止时不得吞异常去重试，应直接上抛");
 });
 await ok("清单与 m3u8 分片都优先页面 fetch、失败才回退 GM_xhr", () => {
     const ft = sliceFn("fetchText");
@@ -441,6 +443,12 @@ await ok("清单与 m3u8 分片都优先页面 fetch、失败才回退 GM_xhr", 
     assert.ok(/fetchViaPage\(rt, segUrl/.test(m3u8), "m3u8 分片应优先走页面 fetch");
     assert.ok(m3u8.indexOf("fetchViaPage") < m3u8.indexOf("xhrWithHandle"), "分片页面 fetch 失败才回退 xhrWithHandle");
     assert.ok(/if \(rt && rt\.abort\) throw e/.test(ft) && /if \(rt && rt\.abort\) throw e/.test(m3u8), "暂停中止时不得吞掉异常去回退，应直接上抛");
+});
+await ok("复用嗅探时播放器已取到的清单，下载不二次请求根清单（v2.9.2）", () => {
+    assert.ok(/const sniffedManifest = new Map\(\)/.test(src), "应有嗅探清单正文缓存");
+    const lm = sliceFn("loadManifest");
+    assert.ok(/sniffedManifest\.get\(url\)/.test(lm) && lm.indexOf("sniffedManifest.get") < lm.indexOf("fetchText"), "loadManifest 应先查缓存、命中则跳过 fetchText");
+    assert.ok(/rememberSniffedManifest\(u\.href, content\)/.test(sliceFn("doM3U")), "嗅探时应存下播放器已取到的清单正文");
 });
 
 console.log("[跨页实时一致性]");

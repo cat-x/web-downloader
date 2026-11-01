@@ -2,7 +2,7 @@
 // @name         Web下载器【m3u8嗅探+断点续传下载管理器】
 // @name:zh-CN   Web下载器【m3u8嗅探+断点续传下载管理器】
 // @name:en      Web Downloader - m3u8 Sniffing & Resumable Download Manager
-// @version      2.9.1
+// @version      2.9.2
 // @description  网页综合下载工具：下载主页面板、分块多线程下载、断点续传（可直写本地文件）、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:zh-CN 网页综合下载工具：下载主页面板、分块多线程下载、断点续传（可直写本地文件）、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:en A web download manager: download hub UI, multi-threaded chunked download, resume (with direct local file writing), pause/continue, task dedup, url replacement, m3u8 sniffing & merging.
@@ -468,7 +468,7 @@
         sanitizeName: true,  // 文件名跨平台自动修正（默认开）：净化 Windows/macOS/Linux/Android 非法字符与保留名，避免无法直接保存
     };
     let settings = Object.assign({}, DEFAULT_SETTINGS);
-    const SCRIPT_VER = "2.9.1";
+    const SCRIPT_VER = "2.9.2";
     // 诊断日志：始终记入环形缓冲（dlog.buf，最近 500 条）供面板一键复制；settings.debug 只控制是否同步打到 F12 控制台
     function dlog(...args) {
         try {
@@ -627,24 +627,34 @@
     function gxhr(rt, opt) { return rt ? xhrWithHandle(rt, opt) : xhr(opt); }
     /* 页面上下文原生 fetch：由站点自身页面发起，Origin/Sec-Fetch-* 等真实身份由浏览器控制、无法伪造，
        与播放器取流完全同构——这是能过 Cloudflare/防盗链的关键。GM_xmlhttpRequest 从扩展后台发起，
-       这些头缺失或异常，常被判 403（老脚本 / 早期版本能下正因它用的是页面 fetch）。credentials 用默认
-       same-origin：跨源分片不带 Cookie（与播放器一致，靠 URL token 鉴权），避免 CDN 回 ACAO:* 时带 include
-       反而被浏览器拦；同源清单则照常带 Cookie。返回原生 Response。 */
+       这些头/会话身份缺失或异常，常被判 403（老脚本 / 早期版本能下正因它用的是页面 fetch）。
+       凭据策略不赌单一方向：先按播放器惯例带 Cookie（include，123av 这类站点的 m3u8/分片 CDN 靠
+       会话 Cookie 鉴权，不带则直接 403）；若被 CORS 拦（如 CDN 回 ACAO:* 不允许带凭据）再自动降级 omit。
+       失败/非 2xx 才由调用方回退 GM_xhr。返回原生 Response。 */
     function fetchViaPage(rt, url, init) {
-        return new Promise((resolve, reject) => {
-            const W = (typeof unsafeWindow !== "undefined" && unsafeWindow) || window;
-            const f = (W && typeof W.fetch === "function") ? W.fetch.bind(W) : null;
-            if (!f) { reject(new Error("页面上下文 fetch 不可用")); return; }
+        const W = (typeof unsafeWindow !== "undefined" && unsafeWindow) || window;
+        const f = (W && typeof W.fetch === "function") ? W.fetch.bind(W) : null;
+        if (!f) return Promise.reject(new Error("页面上下文 fetch 不可用"));
+        const doOnce = (cred) => new Promise((resolve, reject) => {
             let settled = false;
             const ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
             const entry = { abort() { try { ctrl && ctrl.abort(); } catch { } if (!settled) { settled = true; if (rt) rt.handles.delete(entry); reject(new Error("请求已中止")); } } };
             if (rt) rt.handles.add(entry);
-            const opts = Object.assign({ credentials: "same-origin", cache: "no-store", redirect: "follow" }, init || {});
+            const opts = Object.assign({ credentials: cred, cache: "no-store", redirect: "follow" }, init || {});
             if (ctrl) opts.signal = ctrl.signal;
             let p;
             try { p = f(url, opts); } catch (e) { if (rt) rt.handles.delete(entry); reject(e instanceof Error ? e : new Error(String(e))); return; }
             p.then(res => { if (settled) return; settled = true; if (rt) rt.handles.delete(entry); resolve(res); })
              .catch(e => { if (settled) return; settled = true; if (rt) rt.handles.delete(entry); reject(e instanceof Error ? e : new Error(String(e))); });
+        });
+        return doOnce("include").catch(e1 => {
+            if (rt && rt.abort) throw e1;                 // 暂停中止：不重试，直接上抛
+            if (e1 && e1.message === "请求已中止") throw e1;
+            return doOnce("omit").catch(e2 => {          // include 被 CORS/会话拦→换不带 Cookie 再试一次
+                if (rt && rt.abort) throw e2;
+                if (e2 && e2.message === "请求已中止") throw e2;
+                throw e1;                                // 两次都失败：报首个错误（include）供上层日志
+            });
         });
     }
     function pageReferrerInit(referer) {
@@ -684,9 +694,23 @@
         if (r.status < 200 || r.status >= 400) { dlog("fetchText 失败", "HTTP " + r.status, String(url).slice(0, 140), "referer=" + (referer || "无")); throw new Error("HTTP " + r.status + (/blocked|cloudflare|attention required/i.test(r.responseText || "") ? "（源站 Cloudflare 防护拦截，需换源或在源站页重试）" : "")); }
         return r.responseText || "";
     }
+    /* 嗅探时播放器已成功取到的 m3u8 正文缓存（url → 清单文本）：下载同源清单时直接复用，
+       避免二次请求被 CDN/会话鉴权拦（服务器对播放器放行、对重放请求常 403）。仅页内存活，跨页/刷新失效则回退网络。 */
+    const sniffedManifest = new Map();
+    function rememberSniffedManifest(url, content) {
+        if (!url || !content || !/#EXTM3U/.test(content)) return;
+        try { sniffedManifest.set(url, content); if (sniffedManifest.size > 24) sniffedManifest.delete(sniffedManifest.keys().next().value); } catch { }
+    }
     async function loadManifest(url, referer, depth = 0, rt = null) {
         dlog("loadManifest 开始", url.slice(0, 120), "depth=" + depth);
-        const text = await fetchText(url, referer, rt);
+        let text;
+        const cached = sniffedManifest.get(url);
+        if (cached) {
+            dlog("loadManifest 复用嗅探缓存清单（播放器已取到，跳过网络请求）", url.slice(0, 120));
+            text = cached;
+        } else {
+            text = await fetchText(url, referer, rt);
+        }
         if (!/#EXTM3U/.test(text)) throw new Error("不是有效的 m3u8 播放列表");
         const m = parseM3U(text, url);
         if (m.hasKey) throw new Error("加密流（EXT-X-KEY）暂不支持");
@@ -1528,6 +1552,7 @@
             else variantCount = m.playlists.length;
         } catch { }
         noteShown(u.href);
+        rememberSniffedManifest(u.href, content); // 存下播放器已成功取到的清单，下载时直接复用避免二次 403
         showSniffItem({
             type: "m3u8",
             url: u.href,
