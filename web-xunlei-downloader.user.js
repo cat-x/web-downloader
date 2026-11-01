@@ -2,7 +2,7 @@
 // @name         Web迅雷【m3u8嗅探+断点续传下载管理器】
 // @name:zh-CN   Web迅雷【m3u8嗅探+断点续传下载管理器】
 // @name:en      Web Thunder - Download Manager
-// @version      2.3.0
+// @version      2.4.0
 // @description  类迅雷的网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:zh-CN 类迅雷的网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:en A Thunder-like web download manager: download hub UI, multi-threaded chunked download, resume, pause/continue, task dedup, url replacement, m3u8 sniffing & merging.
@@ -321,7 +321,7 @@
         sanitizeName: true,  // 文件名跨平台自动修正（默认开）：净化 Windows/macOS/Linux/Android 非法字符与保留名，避免无法直接保存
     };
     let settings = Object.assign({}, DEFAULT_SETTINGS);
-    const SCRIPT_VER = "2.3.0";
+    const SCRIPT_VER = "2.4.0";
     // 调试日志：只依赖 settings.debug，关闭时直接 return；错误/警告日志不受此开关影响始终输出
     function dlog(...args) {
         if (!settings.debug) return;
@@ -1203,6 +1203,14 @@
       .wtm-fab{position:relative;width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,#1e6fff,#27c1ff);color:#fff;display:flex;align-items:center;justify-content:center;font-size:22px;cursor:pointer;box-shadow:0 4px 14px rgba(30,111,255,.45);user-select:none;}
       .wtm-fab:active{transform:scale(.94);}
       .wtm-badge{position:absolute;right:-4px;bottom:-4px;min-width:18px;height:18px;border-radius:9px;background:#ff5252;color:#fff;font-size:11px;font-weight:bold;display:none;align-items:center;justify-content:center;padding:0 4px;border:2px solid #fff;}
+            .wtm-sbadge{position:absolute;right:-4px;top:-4px;min-width:18px;height:18px;border-radius:9px;background:#18c06b;color:#fff;font-size:11px;font-weight:bold;display:none;align-items:center;justify-content:center;padding:0 4px;border:2px solid #fff;box-shadow:0 2px 6px rgba(24,192,107,.5);z-index:2;}
+            .wtm-snip{position:absolute;right:50px;top:50%;transform:translateY(-50%) translateX(8px);background:rgba(20,26,38,.94);color:#e7eefc;font-size:12px;line-height:1.5;padding:6px 10px;border-radius:10px;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .35s ease,transform .35s ease;border:1px solid rgba(255,255,255,.1);box-shadow:0 6px 18px rgba(0,0,0,.45);z-index:1;}
+            .wtm-snip b{color:#7fe7a6;font-size:13px;}
+            .wtm-snip .tp{color:#ffcf6b;}
+            .wtm-fab .wtm-fab-ico{transition:transform .3s;}
+            .wtm-fab.sniffing{animation:wtm-sniff-pop 1.3s ease;}
+            .wtm-fab.sniffing .wtm-snip{opacity:1;transform:translateY(-50%) translateX(0);}
+            @keyframes wtm-sniff-pop{0%{transform:scale(1);}30%{transform:scale(1.15);}60%{transform:scale(.96);}100%{transform:scale(1);}}
       .wtm-sitem{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:8px;font-size:12px;color:#cdd7e6;}
       .wtm-sitem:hover{background:#1d2534;}
       .wtm-sitem .tag{flex:none;background:#243044;color:#7fb3ff;border-radius:4px;padding:1px 6px;font-size:11px;}
@@ -1275,11 +1283,11 @@
 
     const UI_HTML = `
       <div class="wtm-float" id="float">
-        <div class="wtm-fab" id="fab" title="Web迅雷下载管理器（点击打开 / 拖动移位）"><span>⚡</span><span class="wtm-badge" id="badge">0</span></div>
+        <div class="wtm-fab" id="fab" title="Web迅雷下载管理器（点击打开 / 拖动移位）"><span class="wtm-fab-ico">⚡</span><span class="wtm-badge" id="badge">0</span><span class="wtm-sbadge" id="sbadge" title="嗅探到的资源数">0</span><span class="wtm-snip" id="snip">📡 嗅探到 <b id="snipn">0</b> 个 <span class="tp" id="sniptype"></span></span></div>
       </div>
       <div class="wtm-panel" id="panel">
         <div class="wtm-head">
-          <span class="wtm-logo">⚡ Web迅雷<span class="wtm-ver">v2.3</span></span>
+          <span class="wtm-logo">⚡ Web迅雷<span class="wtm-ver">v2.4</span></span>
           <span class="wtm-total" id="total">↓ 空闲</span>
           <span class="grow"></span>
           <button class="btn ghost" data-act="home" title="打开统一下载主页（固定网址，所有任务在此集中管理）">🏠 主页</button>
@@ -1362,7 +1370,7 @@
 
         const q = s => box.querySelector(s);
         Object.assign(els, {
-            float: q("#float"), fab: q("#fab"), badge: q("#badge"),
+            float: q("#float"), fab: q("#fab"), badge: q("#badge"), sbadge: q("#sbadge"), snipn: q("#snipn"), sniptype: q("#sniptype"), fabIco: q(".wtm-fab-ico"),
             panel: q("#panel"), list: q("#list"), total: q("#total"),
             input: q("#url-input"), settingsBox: q("#settings"), maxbtn: q("#maxbtn"),
             cActive: q("#c-active"), cAll: q("#c-all"), cSniff: q("#c-sniff"),
@@ -1456,6 +1464,35 @@
         els.maxbtn.textContent = state.maximized ? "🗗" : "⬜";
     }
 
+    /* ---- 嗅探反馈：悬浮球脉冲 + 资源数量常驻角标 ---- */
+    function sniffTypeLabel(t) { return t === "m3u8" ? "m3u8" : t === "video" ? "视频" : t === "file" ? "文件" : String(t || "资源"); }
+    function updateSniffBadge() {
+        if (!els.sbadge) return;
+        const n = sniffItems.length;
+        els.sbadge.textContent = n > 99 ? "99+" : String(n);
+        els.sbadge.style.display = n ? "flex" : "none"; // 无资源时隐藏，不干扰下载中徽章
+    }
+    let sniffPulseTimer = 0;
+    function pulseSniffFab() {
+        if (IN_FRAME || !els.fab) return;
+        updateSniffBadge();
+        const byType = {};
+        for (const it of sniffItems) { const k = it.type || "file"; byType[k] = (byType[k] || 0) + 1; }
+        const summary = Object.keys(byType).map(k => sniffTypeLabel(k) + (byType[k] > 1 ? "×" + byType[k] : "")).join(" · ");
+        const latest = sniffItems[sniffItems.length - 1];
+        const glyph = !latest ? "⚡" : latest.type === "m3u8" ? "📡" : latest.type === "video" ? "🎞️" : "📥";
+        if (els.fabIco) els.fabIco.textContent = glyph; // 根据最新一条类型换图标
+        if (els.snipn) els.snipn.textContent = String(sniffItems.length);
+        if (els.sniptype) els.sniptype.textContent = "（" + summary + "）";
+        els.fab.classList.remove("sniffing"); void els.fab.offsetWidth; // 强制重启脉冲动画
+        els.fab.classList.add("sniffing");
+        clearTimeout(sniffPulseTimer);
+        sniffPulseTimer = setTimeout(() => {
+            els.fab.classList.remove("sniffing"); // 提示条渐隐，仅留绿色资源数量角标
+            if (els.fabIco) els.fabIco.textContent = "⚡";
+        }, 3000);
+    }
+
     /* ---- 嗅探条目 ---- */
     function showSniffItem({ type, url, duration, onDownload }) {
         if (IN_FRAME) { // iframe 不建 UI：把资源投送给最顶层框架展示
@@ -1468,6 +1505,7 @@
         try { path = decodeURIComponent(new URL(url).pathname); } catch { }
         sniffItems.push({ url, onDownload, type, duration, path });
         renderSniff();
+        pulseSniffFab(); // 新资源到达：悬浮球脉冲反馈
         // 单一面板原则：新资源自动打开的是同一个下载面板（嗅探标签），不再弹独立窗口
         if (settings.showSniff && !state.panelOpen) { state.tab = "sniff"; openPanel(); }
     }
@@ -1804,6 +1842,7 @@
         els.cActive.textContent = tasks.filter(t => t.status !== "done").length;
         els.cAll.textContent = tasks.length;
         els.cSniff.textContent = sniffItems.length;
+        updateSniffBadge(); // 常驻角标随渲染同步（含嗅探清空后归零隐藏）
         els.panel.querySelectorAll(".tab").forEach(el => el.classList.toggle("on", el.dataset.tab === state.tab));
         if (!state.panelOpen) return; // 面板未开：只刷新徽标/计数，不重建列表 DOM（省电、不闪烁）
 

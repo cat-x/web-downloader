@@ -22,7 +22,7 @@ function sliceFn(name) {
 
 const names = ["fmtSize", "fmtEta", "nameFromUrl", "ensureExt", "nameFromDisposition",
     "headerOf", "parseM3U", "clamp", "sameBase", "mergeTasks", "xhrWithHandle",
-    "looksLikeMeaningfulFile", "cleanFileName", "clampNameBytes", "sanitizeFileName"];
+    "looksLikeMeaningfulFile", "cleanFileName", "clampNameBytes", "sanitizeFileName", "sniffTypeLabel"];
 const code = `
 const deletedTs = g.deletedTs, rts = g.rts, mgmapi = g.mgmapi;
 ${names.map(sliceFn).join("\n")}
@@ -246,6 +246,22 @@ await ok("净化开关：默认勾选、设置采集与 addTask 收口均就位"
     assert.match(src, /id="s-sanitize"/, "设置面板应有跨平台修正复选框");
     assert.ok(/name: finalName\(spec, url, type\)/.test(src), "addTask 唯一点应走 finalName 收口");
     assert.match(src, /if \(settings\.sanitizeName !== false\)/, "finalName 受开关控制（旧数据无此键时默认开）");
+});
+
+console.log("[嗅探悬浮球反馈]");
+await ok("sniffTypeLabel：类型中文映射", () => {
+    assert.equal(F.sniffTypeLabel("m3u8"), "m3u8");
+    assert.equal(F.sniffTypeLabel("video"), "视频");
+    assert.equal(F.sniffTypeLabel("file"), "文件");
+    assert.equal(F.sniffTypeLabel(undefined), "资源");
+});
+await ok("嗅探反馈接线：脉冲触发/常驻角标/提示条元素与 3s 渐隐均就位", () => {
+    assert.ok(/pulseSniffFab\(\); \/\/ \u65b0\u8d44\u6e90\u5230\u8fbe/.test(src), "showSniffItem 应触发脉冲");
+    assert.ok(/updateSniffBadge\(\);/.test(src), "render 应同步常驻资数量角标");
+    assert.match(src, /id="sbadge"/, "FAB 应带绿色资源数角标");
+    assert.match(src, /id="snip"[\s\S]*?\u55c5\u63a2\u5230/, "应有嗅探提示条");
+    assert.match(src, /},\s*3000\);/, "脉冲应 3 秒后渐隐回默认");
+    assert.ok(/IN_FRAME \|\| !els\.fab/.test(src), "pulseSniffFab 应护栏 iframe 与 UI 未就绪");
 });
 
 setTimeout(() => {
