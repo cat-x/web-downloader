@@ -427,11 +427,11 @@ await ok("清单请求携带源站 Origin/Referer（修复 Cloudflare 跨源拦�
 });
 
 console.log("[源页面原生 fetch 过 Cloudflare（v2.9.1 根因修复）]");
-await ok("fetchViaPage：走 unsafeWindow.fetch、先 include 后自动降级 omit、可中止", () => {
+await ok("fetchViaPage：走 unsafeWindow.fetch、裸fetch→include→omit 三策略、可中止", () => {
     const fv = sliceFn("fetchViaPage");
     assert.ok(/unsafeWindow/.test(fv) && /W\.fetch/.test(fv), "必须取页面上下文的 fetch（与播放器同源同会话，才能过 CF）");
-    assert.ok(/doOnce\("include"\)/.test(fv) && /doOnce\("omit"\)/.test(fv), "凭据不赌单一方向：先带 Cookie(include)，被拦再降级 omit");
-    assert.ok(/credentials:\s*cred/.test(fv), "单次 fetch 的 credentials 由传入策略控制（include/omit）");
+    assert.ok(/label:\s*"裸fetch"/.test(fv) && /label:\s*"include"/.test(fv) && /label:\s*"omit"/.test(fv), "凭据不赌单一方向：先裸 fetch(url)，再 include、再 omit");
+    assert.ok(/for \(const at of attempts\)/.test(fv) && /await doOnce\(at\.extra\)/.test(fv), "应逐个策略尝试、任一拿到 Response 即返回");
     assert.ok(/AbortController/.test(fv) && /rt\.handles\.add\(entry\)/.test(fv), "页面 fetch 也必须注册进 rt.handles 以保证任意阶段可暂停中止");
     assert.ok(/if \(rt && rt\.abort\) throw/.test(fv), "暂停中止时不得吞异常去重试，应直接上抛");
 });
@@ -449,6 +449,16 @@ await ok("复用嗅探时播放器已取到的清单，下载不二次请求根�
     const lm = sliceFn("loadManifest");
     assert.ok(/sniffedManifest\.get\(url\)/.test(lm) && lm.indexOf("sniffedManifest.get") < lm.indexOf("fetchText"), "loadManifest 应先查缓存、命中则跳过 fetchText");
     assert.ok(/rememberSniffedManifest\(u\.href, content\)/.test(sliceFn("doM3U")), "嗅探时应存下播放器已取到的清单正文");
+});
+await ok("跨帧嗅探 relay 携带播放器那一跳的 referer/origin/正文（修复跨源 iframe 下不列）", () => {
+    const si = sliceFn("showSniffItem");
+    assert.ok(/IN_FRAME[\s\S]*referer:\s*location\.href[\s\S]*origin:\s*location\.origin/.test(si), "iframe relay 应携带自身 location.href/origin");
+    assert.ok(/content:\s*\(type === "m3u8"[\s\S]*SNIFF_CONTENT_MAX/.test(si), "relay 应带上清单正文（带上限）");
+    const or = sliceFn("onSniffRelay");
+    assert.ok(/rememberSniffReferer\(p\.url, p\.referer\)/.test(or) && /rememberSniffedManifest\(p\.url, p\.content\)/.test(or), "顶层应缓存 relay 来的 referer 与清单正文");
+    assert.ok(/referer:\s*effRef/.test(or), "跨帧任务的 referer 用播放器那一跳而非顶层页 URL");
+    const rh = sliceFn("refHeader");
+    assert.ok(/h\.Referer = task\.referer/.test(rh) && /h\.Origin = u\.origin/.test(rh), "GM_xhr 回退时按任务 referer 设 Origin/Referer（跨帧 referer 才能命中 CDN 校验）");
 });
 
 console.log("[跨页实时一致性]");

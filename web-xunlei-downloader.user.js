@@ -2,7 +2,7 @@
 // @name         Web下载器【m3u8嗅探+断点续传下载管理器】
 // @name:zh-CN   Web下载器【m3u8嗅探+断点续传下载管理器】
 // @name:en      Web Downloader - m3u8 Sniffing & Resumable Download Manager
-// @version      2.9.2
+// @version      2.9.3
 // @description  网页综合下载工具：下载主页面板、分块多线程下载、断点续传（可直写本地文件）、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:zh-CN 网页综合下载工具：下载主页面板、分块多线程下载、断点续传（可直写本地文件）、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:en A web download manager: download hub UI, multi-threaded chunked download, resume (with direct local file writing), pause/continue, task dedup, url replacement, m3u8 sniffing & merging.
@@ -468,7 +468,7 @@
         sanitizeName: true,  // 文件名跨平台自动修正（默认开）：净化 Windows/macOS/Linux/Android 非法字符与保留名，避免无法直接保存
     };
     let settings = Object.assign({}, DEFAULT_SETTINGS);
-    const SCRIPT_VER = "2.9.2";
+    const SCRIPT_VER = "2.9.3";
     // 诊断日志：始终记入环形缓冲（dlog.buf，最近 500 条）供面板一键复制；settings.debug 只控制是否同步打到 F12 控制台
     function dlog(...args) {
         try {
@@ -626,36 +626,45 @@
     /* ---- 可中止通道：有运行时一律走 xhrWithHandle，保证任何阶段都能被暂停 ---- */
     function gxhr(rt, opt) { return rt ? xhrWithHandle(rt, opt) : xhr(opt); }
     /* 页面上下文原生 fetch：由站点自身页面发起，Origin/Sec-Fetch-* 等真实身份由浏览器控制、无法伪造，
-       与播放器取流完全同构——这是能过 Cloudflare/防盗链的关键。GM_xmlhttpRequest 从扩展后台发起，
-       这些头/会话身份缺失或异常，常被判 403（老脚本 / 早期版本能下正因它用的是页面 fetch）。
-       凭据策略不赌单一方向：先按播放器惯例带 Cookie（include，123av 这类站点的 m3u8/分片 CDN 靠
-       会话 Cookie 鉴权，不带则直接 403）；若被 CORS 拦（如 CDN 回 ACAO:* 不允许带凭据）再自动降级 omit。
-       失败/非 2xx 才由调用方回退 GM_xhr。返回原生 Response。 */
-    function fetchViaPage(rt, url, init) {
+       与播放器取流同构。但不确定站点 CDN 到底要哪种凭据（会话 Cookie？还是 ACAO:* 不允许带凭据？），
+       故不赌单一方向：依次尝试——①裸 fetch(url)（完全复刻老脚本实测能下的那一句，不加任何额外选项）；
+       ②带 Cookie(include)；③不带 Cookie(omit)。任一跳拿到 Response 即返回；全都失败才报错、由调用方回退 GM_xhr。 */
+    async function fetchViaPage(rt, url, init) {
         const W = (typeof unsafeWindow !== "undefined" && unsafeWindow) || window;
         const f = (W && typeof W.fetch === "function") ? W.fetch.bind(W) : null;
-        if (!f) return Promise.reject(new Error("页面上下文 fetch 不可用"));
-        const doOnce = (cred) => new Promise((resolve, reject) => {
+        if (!f) throw new Error("页面上下文 fetch 不可用");
+        const doOnce = (extra) => new Promise((resolve, reject) => {
             let settled = false;
             const ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
             const entry = { abort() { try { ctrl && ctrl.abort(); } catch { } if (!settled) { settled = true; if (rt) rt.handles.delete(entry); reject(new Error("请求已中止")); } } };
             if (rt) rt.handles.add(entry);
-            const opts = Object.assign({ credentials: cred, cache: "no-store", redirect: "follow" }, init || {});
+            const opts = Object.assign({ redirect: "follow" }, init || {}, extra || {});
             if (ctrl) opts.signal = ctrl.signal;
             let p;
             try { p = f(url, opts); } catch (e) { if (rt) rt.handles.delete(entry); reject(e instanceof Error ? e : new Error(String(e))); return; }
             p.then(res => { if (settled) return; settled = true; if (rt) rt.handles.delete(entry); resolve(res); })
              .catch(e => { if (settled) return; settled = true; if (rt) rt.handles.delete(entry); reject(e instanceof Error ? e : new Error(String(e))); });
         });
-        return doOnce("include").catch(e1 => {
-            if (rt && rt.abort) throw e1;                 // 暂停中止：不重试，直接上抛
-            if (e1 && e1.message === "请求已中止") throw e1;
-            return doOnce("omit").catch(e2 => {          // include 被 CORS/会话拦→换不带 Cookie 再试一次
-                if (rt && rt.abort) throw e2;
-                if (e2 && e2.message === "请求已中止") throw e2;
-                throw e1;                                // 两次都失败：报首个错误（include）供上层日志
-            });
-        });
+        const attempts = [
+            { label: "裸fetch", extra: {} },                                  // 与老脚本 fetch(url) 完全一致（method 默认 GET、无 cache 覆盖、同域缺省凭据）
+            { label: "include", extra: { credentials: "include", cache: "no-store" } },
+            { label: "omit", extra: { credentials: "omit", cache: "no-store" } },
+        ];
+        let lastErr = null;
+        for (const at of attempts) {
+            if (rt && rt.abort) throw new Error("请求已中止");
+            try {
+                const res = await doOnce(at.extra);
+                if (at.label !== "裸fetch" || res) dlog("fetchViaPage 成功策略:", at.label, String(url).slice(0, 90));
+                return res;
+            } catch (e) {
+                if (rt && rt.abort) throw e;                 // 暂停中止：不重试，直接上抛
+                if (e && e.message === "请求已中止") throw e;
+                lastErr = e;
+                dlog("fetchViaPage " + at.label + " 失败→换下一种", String(url).slice(0, 90), (e && e.message) || e);
+            }
+        }
+        throw lastErr || new Error("页面 fetch 失败");
     }
     function pageReferrerInit(referer) {
         // fetch 的 referrer 仅在同源时生效；referer 与当前页同源才显式携带（异源浏览器会忽略，不影响）
@@ -697,9 +706,14 @@
     /* 嗅探时播放器已成功取到的 m3u8 正文缓存（url → 清单文本）：下载同源清单时直接复用，
        避免二次请求被 CDN/会话鉴权拦（服务器对播放器放行、对重放请求常 403）。仅页内存活，跨页/刷新失效则回退网络。 */
     const sniffedManifest = new Map();
+    const sniffReferer = new Map(); // url → 实际抓到该资源的那一跳页面 URL（可能来自跨源 iframe），下载时用它作 referer/Origin 才过 CDN 校验
     function rememberSniffedManifest(url, content) {
         if (!url || !content || !/#EXTM3U/.test(content)) return;
         try { sniffedManifest.set(url, content); if (sniffedManifest.size > 24) sniffedManifest.delete(sniffedManifest.keys().next().value); } catch { }
+    }
+    function rememberSniffReferer(url, referer) {
+        if (!url || !referer) return;
+        try { sniffReferer.set(url, referer); if (sniffReferer.size > 40) sniffReferer.delete(sniffReferer.keys().next().value); } catch { }
     }
     async function loadManifest(url, referer, depth = 0, rt = null) {
         dlog("loadManifest 开始", url.slice(0, 120), "depth=" + depth);
@@ -1556,6 +1570,7 @@
         showSniffItem({
             type: "m3u8",
             url: u.href,
+            content,
             duration: duration ? `${Math.ceil(duration * 10 / 60) / 10} 分钟` : (variantCount ? `多码率(${variantCount})` : "未知"),
             onDownload() {
                 askConfirm({ type: "m3u8", url: u.href, referer: location.href }); // m3u8 名恒取动态顶层标题（.ts 由 suggestName 补），URL 名常为 index/master 无意义
@@ -1911,9 +1926,16 @@
     }
 
     /* ---- 嗅探条目 ---- */
-    function showSniffItem({ type, url, duration, onDownload }) {
-        if (IN_FRAME) { // iframe 不建 UI：把资源投送给最顶层框架展示
-            mgmapi.setValue("wtm-sniff-in", JSON.stringify({ url, type, duration: duration || "", ts: Date.now(), by: PAGE_ID })).catch(() => { });
+    const SNIFF_CONTENT_MAX = 512 * 1024; // 跨帧 relay 清单正文上限（512KB），超限则只回传 URL、走网络回退
+    function showSniffItem({ type, url, duration, onDownload, content }) {
+        if (IN_FRAME) { // iframe 不建 UI：把资源投送给最顶层框架展示；一并带上“播放器这一跳”的 referer/origin 与清单正文
+            try {
+                mgmapi.setValue("wtm-sniff-in", JSON.stringify({
+                    url, type, duration: duration || "", ts: Date.now(), by: PAGE_ID,
+                    referer: location.href, origin: location.origin,
+                    content: (type === "m3u8" && content && content.length <= SNIFF_CONTENT_MAX) ? content : "",
+                })).catch(() => { });
+            } catch { }
             return;
         }
         const idx = sniffItems.length;
@@ -1935,7 +1957,11 @@
         if (!p || !p.url || p.by === PAGE_ID || p.ts <= lastRelayTs) return;
         lastRelayTs = p.ts;
         if (sniffItems.some(x => x.url === p.url)) return;
-        showSniffItem({ type: p.type, url: p.url, duration: p.duration, onDownload: () => askConfirm({ url: p.url, type: p.type }) });
+        // 跨帧嗅探到的资源：把“播放器那一跳”的 referer 与清单正文存下来，下载时复用（顶层页自己 fetch 常被 CDN 拒）
+        if (p.referer) rememberSniffReferer(p.url, p.referer);
+        if (p.content) rememberSniffedManifest(p.url, p.content);
+        const effRef = p.referer || location.href;
+        showSniffItem({ type: p.type, url: p.url, duration: p.duration, content: p.content, onDownload: () => askConfirm({ url: p.url, type: p.type, referer: effRef }) });
     }
 
     /* ---- 嗅探小窗（右上角紧凑卡片，不抢占整屏）---- */

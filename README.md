@@ -75,14 +75,14 @@
 - **任务模型与同步**：`wtm-tasks` 带 `updatedAt` 时间戳合并 + 墓碑删除；监听 + 4s 轮询双通道对账（面板打开时 1.2s 快速对账）；下载端网络回调事件驱动即时落盘（800ms 限流）并续期 `ownerTs` 认领，属主存活窗口 20s
 - **下载归属**：任务绑定创建页的域（`origin`），只有与任务**同源**的页面才运行它（`canRunHere()`）——下载请求由**页面上下文原生 `fetch` 发起**（`fetchViaPage`），`Origin`/`Sec-Fetch-*`/Cookie 等真实身份由浏览器控制、与站点播放器完全同构，天然过防盗链与 Cloudflare；Range 分片 + 线程池 + 断点/直写缓存都落在本源。主页与其它页面为只读总览，跨域控制（暂停/删除/换址/另存/转MP4）经 `wtm-cmd` 命令（60s 有效期）转发；他源任务的「继续/另存」会引导打开来源站点页认领
 - **下载核心**：清单与 m3u8 分片**优先页面原生 `fetch`（`fetchViaPage`，走 `unsafeWindow.fetch`、凭据不赌单一方向——先 `include` 带 Cookie（123av 类站点靠会话 Cookie 鉴权，不带直接 403）、被 CORS 拦再自动降级 `omit`，注册进 `rt.handles` 可暂停中止）**，失败/非 2xx 才回退 `GM_xmlhttpRequest`（`gxhr`/`xhrWithHandle`，扩展后台发起、需手动注入 Origin/Referer 并在 403 去 Origin 重试——已知它缺页面会话身份常被 CF 拦；abort 需手动 reject）。另：嗅探时播放器已成功取到的 m3u8 正文会缓存（`sniffedManifest`），下载同源清单时直接复用、不再二次请求根清单（避开“服务器只认播放器、对重放 403”）
-- **m3u8 模块**：嗅探（fetch/XHR 注入）→ 清单解析（多码率/加密 key）→ 分片合并
+- **m3u8 模块**：嗅探（fetch/XHR 注入）→ 清单解析（多码率/加密 key）→ 分片合并；跨源 iframe 播放器嗅到的资源会把“播放器那一跳”的 referer/origin 与清单正文一起 relay 给顶层，下载时复用清单正文、并用真实 referer 发请求（顶层页直接 fetch 常被 CDN 拒）
 - **MP4 转封装**：ffmpeg.wasm 运行在**页世界**（隔离世界跑不了），组件懒加载；缓存模式数据经同源 IndexedDB 交换，直写模式成品字节直接 postMessage 传入、MP4 回传后直接落盘本地文件夹
 - **UI**：Shadow DOM 单面板（徽标/任务列表/嗅探列表/确认弹窗/设置），容器挂 `documentElement` 并跟随全屏元素保证永置顶
 
 ### 自测
 
 ```bash
-node self-test.mjs   # 42 组断言：工具函数、m3u8 解析、任务合并、命令过滤、abort 语义、键范围一致性、文件名净化、跨页同步、诊断报告、分片直写本地文件（写流不入 IDB、m3u8 按序刷盘）、源页面直接下载（canRunHere 归属、只读页不回写）、源页面原生 fetch 过 Cloudflare（优先 fetchViaPage include→omit、失败回退 GM_xhr、复用嗅探清单）等
+node self-test.mjs   # 43 组断言：工具函数、m3u8 解析、任务合并、命令过滤、abort 语义、键范围一致性、文件名净化、跨页同步、诊断报告、分片直写本地文件（写流不入 IDB、m3u8 按序刷盘）、源页面直接下载（canRunHere 归属、只读页不回写）、源页面原生 fetch 过 Cloudflare（fetchViaPage 裸fetch→include→omit、失败回退 GM_xhr、复用嗅探清单、跨帧 relay 携带 referer/origin）等
 ```
 
 原理：从 `user.js` 源码中**按行切取真实函数**注入依赖 stub 执行，不存在测试副本与实现漂移。改完核心逻辑务必跑一遍。
