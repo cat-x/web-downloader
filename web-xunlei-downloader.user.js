@@ -2,7 +2,7 @@
 // @name         Web下载器【m3u8嗅探+断点续传下载管理器】
 // @name:zh-CN   Web下载器【m3u8嗅探+断点续传下载管理器】
 // @name:en      Web Downloader - m3u8 Sniffing & Resumable Download Manager
-// @version      2.8.0
+// @version      2.8.1
 // @description  网页综合下载工具：下载主页面板、分块多线程下载、断点续传（可直写本地文件）、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:zh-CN 网页综合下载工具：下载主页面板、分块多线程下载、断点续传（可直写本地文件）、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:en A web download manager: download hub UI, multi-threaded chunked download, resume (with direct local file writing), pause/continue, task dedup, url replacement, m3u8 sniffing & merging.
@@ -466,7 +466,7 @@
         sanitizeName: true,  // 文件名跨平台自动修正（默认开）：净化 Windows/macOS/Linux/Android 非法字符与保留名，避免无法直接保存
     };
     let settings = Object.assign({}, DEFAULT_SETTINGS);
-    const SCRIPT_VER = "2.8.0";
+    const SCRIPT_VER = "2.8.1";
     // 诊断日志：始终记入环形缓冲（dlog.buf，最近 500 条）供面板一键复制；settings.debug 只控制是否同步打到 F12 控制台
     function dlog(...args) {
         try {
@@ -624,8 +624,21 @@
     /* ---- 可中止通道：有运行时一律走 xhrWithHandle，保证任何阶段都能被暂停 ---- */
     function gxhr(rt, opt) { return rt ? xhrWithHandle(rt, opt) : xhr(opt); }
     async function fetchText(url, referer, rt) {
-        const r = await gxhr(rt, { method: "GET", url, headers: referer ? { Referer: referer } : {}, timeout: 30000 });
-        if (r.status < 200 || r.status >= 400) { dlog("fetchText 失败", "HTTP " + r.status, String(url).slice(0, 140), "referer=" + (referer || "无")); throw new Error("HTTP " + r.status); }
+        // 关键：清单请求必须像分片一样携带源站 Origin/Referer（参考老脚本），否则从主页跨源发出时
+        // 默认 Origin=主页域，会被 Cloudflare 等反爬 CDN 识破拦截（表现为 loadManifest 长期挂起/403）
+        const headers = {};
+        if (referer) { try { const u = new URL(referer); headers.Origin = u.origin; headers.Referer = referer; } catch { headers.Referer = referer; } }
+        let r;
+        try {
+            r = await gxhr(rt, { method: "GET", url, headers, timeout: 30000 });
+        } catch (e) {
+            dlog("fetchText 网络异常", String(url).slice(0, 140), (e && e.message) || e); throw e;
+        }
+        if ((r.status === 401 || r.status === 403) && headers.Origin) { // 部分 WAF 见跨源 Origin 即拦：去 Origin 只留 Referer 重试一次
+            dlog("fetchText 403→去 Origin 重试", "HTTP " + r.status, String(url).slice(0, 140));
+            r = await gxhr(rt, { method: "GET", url, headers: referer ? { Referer: referer } : {}, timeout: 30000 });
+        }
+        if (r.status < 200 || r.status >= 400) { dlog("fetchText 失败", "HTTP " + r.status, String(url).slice(0, 140), "referer=" + (referer || "无")); throw new Error("HTTP " + r.status + (/blocked|cloudflare|attention required/i.test(r.responseText || "") ? "（源站 Cloudflare 防护拦截，需换源或在源站页重试）" : "")); }
         return r.responseText || "";
     }
     async function loadManifest(url, referer, depth = 0, rt = null) {

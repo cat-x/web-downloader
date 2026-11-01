@@ -363,6 +363,13 @@ await ok("403 缓解：仅在 401/403 且带 referer 时去 Origin 重试一次"
     const bare = lines.filter(l => /await xhr\(/.test(l));
     assert.equal(bare.length, 0, "重试仍需用可中止通道");
 });
+await ok("清单请求携带源站 Origin/Referer（修复 Cloudflare 跨源拦截）", () => {
+    const ft = sliceFn("fetchText");
+    assert.ok(/headers\.Origin = u\.origin/.test(ft), "fetchText 必须从 referer 推导并设置 Origin（否则默认主页域被 CF 拦）");
+    assert.ok(/headers\.Referer = referer/.test(ft), "fetchText 应携带源站 Referer");
+    assert.ok(/403→去 Origin 重试/.test(ft), "清单 403 应有去 Origin 重试兜底");
+    assert.ok(/loadManifest 开始/.test(sliceFn("loadManifest")) && /fetchText\(url, referer, rt\)/.test(sliceFn("loadManifest")), "loadManifest 应把 referer 透传给 fetchText");
+});
 
 console.log("[跨页实时一致性]");
 await ok("estSpeed：落盘字节增长估出速度，无增长衰减，样本过期/回退重置", () => {
