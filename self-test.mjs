@@ -184,25 +184,41 @@ await ok("无遗留不可中止网络调用（运行期一律 gxhr/xhrWithHandle
 });
 
 console.log("[调试日志开关]");
-await ok("dlog：关闭时静默，开启时输出 [wtm][dbg] 时间戳前缀", () => {
+await ok("dlog：关闭时静默但仍记缓冲，开启时输出 [wtm][dbg] 时间戳前缀", () => {
     const body = sliceFn("dlog");
     const make = new Function("settings", "console", body + "; return dlog;");
     const logs = [];
     const c = { log: (...a) => logs.push(a) };
     let d = make({ debug: false }, c);
     d("隐藏");
-    assert.equal(logs.length, 0, "debug=false 必须零输出");
+    assert.equal(logs.length, 0, "debug=false 必须零控制台输出");
+    assert.equal(d.buf.length, 1, "debug=false 仍要记录环形缓冲（供一键复制）");
+    assert.ok(/^\[\d{2}:\d{2}:\d{2}\.\d{3}\] 隐藏$/.test(d.buf[0]), "缓冲行格式：时间戳 + 内容");
     d = make({ debug: true }, c);
     d("可见", 42);
     assert.equal(logs.length, 1);
     assert.match(logs[0][0], /^\[wtm\]\[dbg \d{2}:\d{2}:\d{2}\.\d{3}\]$/, "前缀格式");
     assert.equal(logs[0][1], "可见");
+    const d2 = make({ debug: false }, { log() { } });
+    for (let i = 0; i < 520; i++) d2("x" + i);
+    assert.equal(d2.buf.length, 500, "环形缓冲上限 500 条");
 });
 await ok("debug 设置：默认关闭、UI 采集、埋点不走裸 console", () => {
     assert.match(src, /debug:\s*false,/, "DEFAULT_SETTINGS.debug 应默认 false");
     assert.ok(/settings\.debug = !!\(els\.sDebug/.test(src), "save-settings 应采集 debug 开关");
     const bare = lines.filter(l => /^\s*console\.log\(/.test(l));
     assert.ok(bare.length <= 1, `console.log 只允许 dlog 内部一处，实际 ${bare.length} 处`);
+});
+
+console.log("[诊断报告一键复制]");
+await ok("诊断报告：设置区按钮/GM_setClipboard 授权/降级通道/头部字段全接线", () => {
+    assert.match(src, /data-act="copy-diag"/, "设置区应有复制诊断报告按钮");
+    assert.ok(/case "copy-diag"/.test(src), "分发器应处理 copy-diag");
+    assert.match(src, /\/\/ \@grant\s+GM_setClipboard/, "元数据应声明 GM_setClipboard");
+    assert.ok(/function buildDiagText\(\)/.test(src), "应有报告拼装函数");
+    assert.ok(/GM_setClipboard\(txt/.test(src), "优先走 GM 剪贴板通道");
+    assert.ok(/navigator\.clipboard\.writeText\(txt\)/.test(src), "无 GM 时降级页内剪贴板 API");
+    assert.ok(/设置: \$\{JSON\.stringify\(settings\)\}/.test(src), "报告应含设置快照");
 });
 
 console.log("[动态文件名取名]");

@@ -2,7 +2,7 @@
 // @name         Web下载器【m3u8嗅探+断点续传下载管理器】
 // @name:zh-CN   Web下载器【m3u8嗅探+断点续传下载管理器】
 // @name:en      Web Downloader - m3u8 Sniffing & Resumable Download Manager
-// @version      2.6.0
+// @version      2.7.0
 // @description  网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:zh-CN 网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:en A web download manager: download hub UI, multi-threaded chunked download, resume, pause/continue, task dedup, url replacement, m3u8 sniffing & merging.
@@ -20,6 +20,7 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_addValueChangeListener
+// @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
 // @grant        GM_unregisterMenuCommand
 // @grant        GM_xmlhttpRequest
@@ -325,9 +326,14 @@
         sanitizeName: true,  // 文件名跨平台自动修正（默认开）：净化 Windows/macOS/Linux/Android 非法字符与保留名，避免无法直接保存
     };
     let settings = Object.assign({}, DEFAULT_SETTINGS);
-    const SCRIPT_VER = "2.6.0";
-    // 调试日志：只依赖 settings.debug，关闭时直接 return；错误/警告日志不受此开关影响始终输出
+    const SCRIPT_VER = "2.7.0";
+    // 诊断日志：始终记入环形缓冲（dlog.buf，最近 500 条）供面板一键复制；settings.debug 只控制是否同步打到 F12 控制台
     function dlog(...args) {
+        try {
+            const buf = dlog.buf || (dlog.buf = []);
+            buf.push(`[${new Date().toISOString().slice(11, 23)}] ` + args.map(a => (typeof a === "string" ? a : (a && a.message) ? a.message : String(a))).join(" "));
+            if (buf.length > 500) buf.splice(0, buf.length - 500);
+        } catch { }
         if (!settings.debug) return;
         try { console.log(`[wtm][dbg ${new Date().toISOString().slice(11, 23)}]`, ...args); } catch { }
     }
@@ -1364,6 +1370,7 @@
           <label class="ck"><input type="checkbox" id="s-show-sniff">新资源自动弹出小窗提示</label>
           <label class="ck"><input type="checkbox" id="s-fab">显示 ⚡ 悬浮球</label>
           <label class="ck"><input type="checkbox" id="s-debug">调试日志（F12 控制台）</label>
+          <button class="btn ghost mini" data-act="copy-diag" title="把最近诊断日志连同版本/环境/设置快照复制到剪贴板，便于反馈问题">📋 复制诊断报告</button>
           <label class="ck"><input type="checkbox" id="s-sanitize">文件名跨平台自动修正</label>
           <label class="grow" style="flex-basis:100%">统一主页 URL <input type="text" id="s-homeurl" style="width:240px" placeholder="https://cat-x.github.io/web-downloader/#wtm-home"></label>
           <button class="btn primary mini" data-act="save-settings">保存设置</button>
@@ -1665,6 +1672,23 @@
         return null;
     }
 
+    /* ---- 诊断报告：版本/环境/设置快照 + 日志缓冲，一键复制用于问题反馈 ---- */
+    function buildDiagText() {
+        const buf = dlog.buf || [];
+        const running = tasks.filter(t => ["downloading", "queued", "merging"].includes(t.status)).length;
+        const head = [
+            `Web下载器诊断报告 v${SCRIPT_VER}`,
+            `时间: ${new Date().toLocaleString()}`,
+            `页面: ${location.href.slice(0, 160)}`,
+            `身份: ${isEngine() ? "主页/引擎页" : "入口页"}${IN_FRAME ? "（iframe）" : ""}  pageID=${PAGE_ID}`,
+            `UA: ${navigator.userAgent}`,
+            `任务: 共 ${tasks.length}，进行中 ${running}，嗅探资源 ${sniffItems.length}`,
+            `设置: ${JSON.stringify(settings)}`,
+            `---- 最近日志 ${buf.length} 条（未开启调试日志也会记录）----`,
+        ];
+        return head.concat(buf).join("\n");
+    }
+
     /* ---- 面板事件 ---- */
     function bindPanel() {
         els.input.addEventListener("keydown", e => {
@@ -1722,6 +1746,17 @@
                     }
                     case "max": toggleMax(); break;
                     case "close": closePanel(); break;
+                    case "copy-diag": {
+                        const txt = buildDiagText();
+                        const tell = ok => mgmapi.message(ok ? `已复制诊断报告（${txt.length} 字符），可直接粘贴发送` : "复制失败：请允许剪贴板权限后重试");
+                        if (typeof GM_setClipboard === "function") {
+                            try { GM_setClipboard(txt, { type: "text", filetype: "plain" }); tell(true); break; } catch { }
+                        }
+                        try {
+                            navigator.clipboard.writeText(txt).then(() => tell(true), () => tell(false));
+                        } catch { tell(false); }
+                        break;
+                    }
                     case "tab":
                         state.tab = el.dataset.tab;
                         render();
