@@ -240,12 +240,28 @@ await ok("sanitizeFileName：非法字符/保留名/首尾点空格/多字节截
     assert.ok(new TextEncoder().encode(long).length <= 120, "UTF-8 字节不超 120");
     assert.ok(long.endsWith(".mp4"), "截断应保留扩展名");
 });
-await ok("净化开关：默认勾选、设置采集与 addTask 收口均就位", () => {
+await ok("sanitizeOn：任务级勾选优先，未指定时跟随全局开关", () => {
+    const make = new Function("settings", sliceFn("sanitizeOn") + "; return sanitizeOn;");
+    const on = make({ sanitizeName: true });
+    assert.equal(on(undefined), true, "无 spec 默认净化");
+    assert.equal(on({}), true, "spec 未带 sanitize 跟随全局");
+    assert.equal(on({ sanitize: false }), false, "任务级取消勾选则不净化");
+    assert.equal(on({ sanitize: true }), true);
+    const off = make({ sanitizeName: false });
+    assert.equal(off({}), false, "全局关闭时默认不净化");
+    assert.equal(off({ sanitize: true }), true, "任务级勾选可反向覆盖全局关闭");
+    assert.equal(make({})({}), true, "旧配置无 sanitizeName 键时默认开");
+});
+await ok("净化开关：设置页默认勾选 + 确认面板任务级勾选与 addTask/收口接线就位", () => {
     assert.match(src, /sanitizeName:\s*true,/, "DEFAULT_SETTINGS.sanitizeName 应默认 true");
     assert.ok(/settings\.sanitizeName = !!\(els\.sSanitize/.test(src), "save-settings 应采集 sSanitize");
     assert.match(src, /id="s-sanitize"/, "设置面板应有跨平台修正复选框");
+    assert.match(src, /id="cf-sanitize"/, "确认面板应有任务级修正复选框");
+    assert.ok(/sanitize: els\.cfSanitize \? els\.cfSanitize\.checked : undefined/.test(src), "cf-ok 应读取任务级勾选");
     assert.ok(/name: finalName\(spec, url, type\)/.test(src), "addTask 唯一点应走 finalName 收口");
-    assert.match(src, /if \(settings\.sanitizeName !== false\)/, "finalName 受开关控制（旧数据无此键时默认开）");
+    assert.ok(/if \(sanitizeOn\(spec\)\)/.test(src), "finalName 应走任务级优先的 sanitizeOn");
+    assert.ok(/sanitize: sanitizeOn\(spec\),/.test(src), "addTask 应逐任务落 sanitize 字段");
+    assert.ok(/task\.sanitize === false \? fn : sanitizeFileName\(fn\)/.test(src), "服务端改名应遵循任务级勾选");
 });
 
 console.log("[嗅探悬浮球反馈]");
@@ -307,6 +323,15 @@ await ok("接线：事件驱动落盘/20s 认领窗/面板快速对账/估速显
     assert.ok(/pollStorageOnce\(\); \/\/ 打开即取最新存储/.test(src), "openPanel 应立即对账");
     assert.ok(/estSpeeds\.get\(t\.id\)/.test(src), "taskHtml 速度应回退到估算值");
     assert.ok(/saveChain = saveChain\.then\(doSaveTasksNow\)/.test(src), "落盘必须串行防交错");
+});
+
+console.log("[品牌统一]");
+await ok("全脚本不再出现“迅雷/Thunder”称谓，统一 Web下载器", () => {
+    assert.ok(!/迅雷/.test(src), "源码不应含“迅雷”字样");
+    assert.ok(!/Thunder/i.test(src), "源码不应含“Thunder”字样");
+    assert.match(src, /@name\s+Web下载器/, "@name 应为 Web下载器");
+    assert.match(src, /wtm-logo">⚡ Web下载器/, "面板 logo 应为 Web下载器");
+    assert.ok(/wtm-ver">v\$\{SCRIPT_VER\}/.test(src), "logo 版本号应动态跟随 SCRIPT_VER");
 });
 
 setTimeout(() => {

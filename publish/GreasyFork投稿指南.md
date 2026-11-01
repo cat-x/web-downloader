@@ -1,4 +1,4 @@
-# Greasy Fork 投稿指南 · Web迅雷
+# Greasy Fork 投稿指南 · Web下载器
 
 > 目标脚本：`publish/web-xunlei-downloader.greasyfork.user.js`
 > 与主脚本的唯一区别：**已移除 `@downloadURL`/`@updateURL`**（更新交给 Greasy Fork 托管），并新增 `@icon` 指向 GitHub Pages 图标。
@@ -23,15 +23,15 @@
 ## 二、投稿描述（直接复制粘贴）
 
 ### 脚本名（标题）
-`Web迅雷【m3u8嗅探+断点续传下载管理器】`
+`Web下载器【m3u8嗅探+断点续传下载管理器】`
 
 ### 简介（一句话，对应 @description）
-`类迅雷的网页综合下载工具：m3u8 自动嗅探与分片合并、分块多线程下载、断点续传、暂停/继续、任务排重、MP4 无损转封装。`
+`网页综合下载工具：m3u8 自动嗅探与分片合并、分块多线程下载、断点续传、暂停/继续、任务排重、MP4 无损转封装。`
 
 ### 详细描述（中文，粘贴到"Description"）
 
 ```markdown
-一个装在浏览器里的"网页版迅雷"。在视频/资源站点自动嗅探 m3u8 与直链，统一管理下载任务，支持断点续传与无损转 MP4。**所有数据仅存本地浏览器（IndexedDB），不上传任何服务器，无需注册。**
+一个装在浏览器里的网页综合下载器。在视频/资源站点自动嗅探 m3u8 与直链，统一管理下载任务，支持断点续传与无损转 MP4。**所有数据仅存本地浏览器（IndexedDB），不上传任何服务器，无需注册。**
 
 ## 主要特性
 - 🛰️ **自动嗅探**：无需点菜单，自动发现 m3u8 / 视频直链，悬浮球实时反馈资源数量与类型
@@ -64,7 +64,7 @@
 ### 详细描述（English，粘贴到英文描述框 / 或作为补充）
 
 ```markdown
-A "web-based Thunder" living in your browser. It auto-sniffs m3u8 & direct links on video/resource sites, manages downloads centrally with resume support and lossless TS→MP4 remux. **All data stays in your browser (IndexedDB); nothing is uploaded, no account needed.**
+A full-featured web download manager living in your browser. It auto-sniffs m3u8 & direct links on video/resource sites, manages downloads centrally with resume support and lossless TS→MP4 remux. **All data stays in your browser (IndexedDB); nothing is uploaded, no account needed.**
 
 ## Features
 - 🛰️ Auto sniffing of m3u8 / video links, with a live floating-ball badge showing count & type

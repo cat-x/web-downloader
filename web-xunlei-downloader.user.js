@@ -1,11 +1,11 @@
 // ==UserScript==
-// @name         Web迅雷【m3u8嗅探+断点续传下载管理器】
-// @name:zh-CN   Web迅雷【m3u8嗅探+断点续传下载管理器】
-// @name:en      Web Thunder - Download Manager
-// @version      2.5.0
-// @description  类迅雷的网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
-// @description:zh-CN 类迅雷的网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
-// @description:en A Thunder-like web download manager: download hub UI, multi-threaded chunked download, resume, pause/continue, task dedup, url replacement, m3u8 sniffing & merging.
+// @name         Web下载器【m3u8嗅探+断点续传下载管理器】
+// @name:zh-CN   Web下载器【m3u8嗅探+断点续传下载管理器】
+// @name:en      Web Downloader - m3u8 Sniffing & Resumable Download Manager
+// @version      2.6.0
+// @description  网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
+// @description:zh-CN 网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
+// @description:en A web download manager: download hub UI, multi-threaded chunked download, resume, pause/continue, task dedup, url replacement, m3u8 sniffing & merging.
 // @author       cat-x
 // @license      MIT
 // @namespace    wtm-downloader
@@ -150,11 +150,16 @@
         if (m && /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i.test(m[1])) s = "_" + s; // Windows 保留名（带扩展也非法）
         return clampNameBytes(s, 120);
     }
+    // 文件名净化是否生效：任务级勾选（确认面板）优先，未指定时跟随全局设置（默认开）
+    function sanitizeOn(spec) {
+        if (spec && spec.sanitize !== undefined && spec.sanitize !== null) return !!spec.sanitize;
+        return settings.sanitizeName !== false;
+    }
     // 任务最终文件名：补扩展名 +（开启时）跨平台净化。addTask 唯一收口，覆盖嗅探/手动/中继/用户手输所有入口
     function finalName(spec, url, type) {
         const ext = type === "m3u8" ? ".ts" : ".bin";
         let nm = ensureExt((spec && spec.name ? String(spec.name) : "").trim() || nameFromUrl(url), ext);
-        if (settings.sanitizeName !== false) {
+        if (sanitizeOn(spec)) {
             const fixed = sanitizeFileName(nm);
             nm = /\.\w{1,6}$/.test(fixed) ? fixed : ensureExt(fixed, ext); // 净化万一吃掉扩展名则兜底补回
         }
@@ -321,7 +326,7 @@
         sanitizeName: true,  // 文件名跨平台自动修正（默认开）：净化 Windows/macOS/Linux/Android 非法字符与保留名，避免无法直接保存
     };
     let settings = Object.assign({}, DEFAULT_SETTINGS);
-    const SCRIPT_VER = "2.5.0";
+    const SCRIPT_VER = "2.6.0";
     // 调试日志：只依赖 settings.debug，关闭时直接 return；错误/警告日志不受此开关影响始终输出
     function dlog(...args) {
         if (!settings.debug) return;
@@ -504,7 +509,7 @@
         } catch (e) { }
         task.mime = headerOf(r, "content-type") || "application/octet-stream";
         const fn = nameFromDisposition(headerOf(r, "content-disposition"));
-        if (fn && !task.named) task.name = fn;
+        if (fn && !task.named) task.name = task.sanitize === false ? fn : sanitizeFileName(fn); // 服务端改名也遵循任务级勾选
         if (r && r.status === 206) {
             const m = /\/\s*(\d+)\s*$/.exec(headerOf(r, "content-range") || "");
             if (m) { task.totalSize = +m[1]; task.resumable = true; }
@@ -524,7 +529,7 @@
                 task.totalSize = +headerOf(hr, "content-length") || 0;
                 task.resumable = /bytes/i.test(headerOf(hr, "accept-ranges"));
                 const fn2 = nameFromDisposition(headerOf(hr, "content-disposition"));
-                if (fn2 && !task.named) task.name = fn2;
+                if (fn2 && !task.named) task.name = task.sanitize === false ? fn2 : sanitizeFileName(fn2);
                 if (!task.mime || task.mime === "application/octet-stream") task.mime = headerOf(hr, "content-type") || task.mime;
             } catch { }
         }
@@ -873,7 +878,8 @@
             id: "t" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
             type,
             url,
-            name: finalName(spec, url, type), // 唯一收口：补扩展名 + 开启时跨平台净化（覆盖所有入口）
+            name: finalName(spec, url, type), // 唯一收口：补扩展名 + 跨平台净化（任务级勾选优先，其次全局设置）
+            sanitize: sanitizeOn(spec),       // 逐任务记住净化选择（后续服务端改名等同样遵循）
             referer: spec.referer || location.href,
             named: !!spec.name,
             threads: clamp(parseInt(spec.threads) || 0, 0, 8), // 每任务独立线程数，0=跟随全局默认
@@ -1326,7 +1332,7 @@
 
     const UI_HTML = `
       <div class="wtm-float" id="float">
-        <div class="wtm-fab" id="fab" title="Web迅雷下载管理器（点击打开 / 拖动移位）"><span class="wtm-fab-ico">⚡</span><span class="wtm-badge" id="badge">0</span><span class="wtm-sbadge" id="sbadge" title="嗅探到的资源数">0</span><span class="wtm-snip" id="snip">📡 嗅探到 <b id="snipn">0</b> 个 <span class="tp" id="sniptype"></span></span></div>
+        <div class="wtm-fab" id="fab" title="Web下载器（点击打开 / 拖动移位）"><span class="wtm-fab-ico">⚡</span><span class="wtm-badge" id="badge">0</span><span class="wtm-sbadge" id="sbadge" title="嗅探到的资源数">0</span><span class="wtm-snip" id="snip">📡 嗅探到 <b id="snipn">0</b> 个 <span class="tp" id="sniptype"></span></span></div>
       </div>
       <div class="wtm-snifffly" id="sniff-pop">
         <div class="sf-head"><span class="sf-title">📡 嗅探到资源</span><span id="sf-count"></span><span class="grow"></span><button class="btn ghost mini" data-act="sf-close" title="收起小窗">✕</button></div>
@@ -1335,7 +1341,7 @@
       </div>
       <div class="wtm-panel" id="panel">
         <div class="wtm-head">
-          <span class="wtm-logo">⚡ Web迅雷<span class="wtm-ver">v2.4</span></span>
+          <span class="wtm-logo">⚡ Web下载器<span class="wtm-ver">v${SCRIPT_VER}</span></span>
           <span class="wtm-total" id="total">↓ 空闲</span>
           <span class="grow"></span>
           <button class="btn ghost" data-act="home" title="打开统一下载主页（固定网址，所有任务在此集中管理）">🏠 主页</button>
@@ -1390,6 +1396,7 @@
           <div class="crow"><span class="clb">保存位置</span><span class="curl" id="cf-dir"></span><button class="btn ghost mini" data-act="cf-pickdir">更改文件夹…</button></div>
           <div class="crow"><span class="clb">线程数</span><input type="number" id="cf-threads" min="1" max="8" style="flex:none;width:72px"><span class="clb" style="width:auto">立即开始</span><input type="checkbox" id="cf-now"></div>
           <div class="crow"><span class="clb" style="width:auto"><input type="checkbox" id="cf-mp4"> 完成后转 MP4</span><span class="cnote" style="margin-top:0">无损重封装（-c copy）；首次使用联网加载组件，失败不影响 TS 成品</span></div>
+          <div class="crow"><span class="clb" style="width:auto"><input type="checkbox" id="cf-sanitize"> 文件名跨平台自动修正</span><span class="cnote" style="margin-top:0">取消则按原名保存（可能含目标系统非法字符无法保存）</span></div>
           <div class="cnote">超过并发数的任务会自动排队；取消勾选「立即开始」则放入暂停列表，稍后手动继续。指定文件夹需 Chrome/Edge 并在统一主页授权（保存时不再弹框，直接写入；注意浏览器禁止直接选中「下载/桌面/文稿」本身，请在其中建子文件夹再选）。</div>
           <div class="cfoot"><button class="btn ghost" data-act="cf-cancel">取消</button><button class="btn primary" data-act="cf-ok">开始下载</button></div>
         </div>
@@ -1422,13 +1429,15 @@
             sniffPop: q("#sniff-pop"), sfCount: q("#sf-count"), sfList: q("#sf-list"), panel: q("#panel"), list: q("#list"), total: q("#total"),
             input: q("#url-input"), settingsBox: q("#settings"), maxbtn: q("#maxbtn"),
             cActive: q("#c-active"), cAll: q("#c-all"), cSniff: q("#c-sniff"),
-            cfModal: q("#cf-modal"), cfUrl: q("#cf-url"), cfName: q("#cf-name"), cfDir: q("#cf-dir"), cfThreads: q("#cf-threads"), cfNow: q("#cf-now"), cfMp4: q("#cf-mp4"),
+            cfModal: q("#cf-modal"), cfUrl: q("#cf-url"), cfName: q("#cf-name"), cfDir: q("#cf-dir"), cfThreads: q("#cf-threads"), cfNow: q("#cf-now"), cfMp4: q("#cf-mp4"), cfSanitize: q("#cf-sanitize"),
             sDirName: q("#s-dirname"),
             sThreads: q("#s-threads"), sChunk: q("#s-chunk"), sConc: q("#s-conc"), sAuto: q("#s-auto"), sSniff: q("#s-sniff"), sShowSniff: q("#s-show-sniff"), sFab: q("#s-fab"), sHomeUrl: q("#s-homeurl"), sMp4: q("#s-mp4"), sDebug: q("#s-debug"), sSanitize: q("#s-sanitize"),
         });
 
         bindFab();
         bindPanel();
+        // 任务级净化勾选：当场勾上就把已填的文件名洗一遍（取消勾选不改动现名）
+        if (els.cfSanitize) els.cfSanitize.addEventListener("change", () => { if (els.cfSanitize.checked && els.cfName) { try { els.cfName.value = sanitizeFileName(els.cfName.value || ""); } catch { } } });
         renderSniff(); // 补显 UI 就绪前嗅探到的资源
         applyEntryVisibility();
         addEventListener("hashchange", applyRoute); // 地址栏改 #wtm-home 也能进出主页
@@ -1595,7 +1604,7 @@
         render();
     }
 
-    /* ---- 新任务确认面板（迅雷式：文件名/保存文件夹/线程数/排队可改） ---- */
+    /* ---- 新任务确认面板（文件名/保存文件夹/线程数/排队/文件名修正可改） ---- */
     let pendingConfirm = null;
     let dirHandle = null; // File System Access 目录句柄（仅引擎页有意义，存于本页 IndexedDB meta）
     function updateConfirmDirText() {
@@ -1619,7 +1628,7 @@
         } catch (e) {
             if (e && (e.name === "AbortError" || (e.name === "NotAllowedError" && /permission is denied|denied by the user/i.test(e.message || "")))) return; // 用户主动取消，不打扰
             // Chrome 安全策略（规范明文，跨平台一致）：禁止直接选中 下载/文稿/桌面/主目录 本身，哪怕完全空也报“含系统文件”；其子文件夹允许
-            mgmapi.message("选择被拒：浏览器禁止网页直接选中「下载/桌面/文稿/主目录」本身（防盗取安全策略，各系统一致）。请在选择器里进入下载目录后新建一个子文件夹（如 Web迅雷）并选中它", 12000);
+            mgmapi.message("选择被拒：浏览器禁止网页直接选中「下载/桌面/文稿/主目录」本身（防盗取安全策略，各系统一致）。请在选择器里进入下载目录后新建一个子文件夹（如 Web下载器）并选中它", 12000);
         }
     }
     async function askConfirm(spec) {
@@ -1644,7 +1653,8 @@
         pendingConfirm = { url, type, referer: spec.referer || location.href };
         els.cfUrl.textContent = url;
         els.cfUrl.title = url;
-        els.cfName.value = settings.sanitizeName !== false ? sanitizeFileName(baseName) : baseName;
+        els.cfName.value = sanitizeOn(spec) ? sanitizeFileName(baseName) : baseName;
+        els.cfSanitize.checked = sanitizeOn(spec);
         els.cfThreads.value = (spec.threads > 0 ? spec.threads : settings.threads);
         els.cfNow.checked = spec.startNow !== false;
         const tsish = type === "m3u8" || /[.]ts([?#]|$)/i.test(url); // 只有 TS 类流才能无损转封装
@@ -1792,6 +1802,7 @@
                             threads: parseInt(els.cfThreads.value) || 0,
                             startNow: els.cfNow.checked,
                             mp4: els.cfMp4.checked,
+                            sanitize: els.cfSanitize ? els.cfSanitize.checked : undefined, // 任务级覆盖全局默认
                         });
                         els.cfModal.classList.remove("open");
                         pendingConfirm = null;
@@ -2141,7 +2152,7 @@
             const mark = (typeof unsafeWindow !== "undefined" && unsafeWindow) ? unsafeWindow : window;
             if (mark.__wtm_boot && String(mark.__wtm_boot).indexOf(PAGE_ID) !== 0) {
                 console.warn("[wtm] 检测到另一个脚本实例：", mark.__wtm_boot, "本页将同时存在两套 UI/引擎，请在 Tampermonkey 中只保留一个");
-                mgmapi.message("⚠️ 本页检测到另一个 Web迅雷实例（" + mark.__wtm_boot + "），请检查是否重复安装了脚本", 10000);
+                mgmapi.message("⚠️ 本页检测到另一个 Web下载器实例（" + mark.__wtm_boot + "），请检查是否重复安装了脚本", 10000);
             }
             mark.__wtm_boot = PAGE_ID + "@" + SCRIPT_VER;
         } catch { }
