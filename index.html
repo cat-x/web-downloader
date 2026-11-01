@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Web迅雷 · 下载中心</title>
+<style>
+  /* 纯静态壳页：零外部资源、零脚本。安装油猴脚本后，本页会被脚本的全屏下载中心接管；
+     下面这些内容只在「未安装 / 未启用脚本」时作为兜底说明展示。 */
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #0b1220; color: #dbe4f3;
+  }
+  main { max-width: 620px; padding: 40px 28px; }
+  h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: 1px; }
+  h1 .bolt { color: #f5a623; }
+  .sub { color: #7d8aa5; font-size: 14px; margin-bottom: 28px; }
+  .card {
+    background: #121c30; border: 1px solid #223050; border-radius: 12px;
+    padding: 18px 20px; margin-bottom: 16px; line-height: 1.8; font-size: 14px;
+  }
+  .card b { color: #fff; }
+  .warn { border-color: #5a4420; background: #1c1608; color: #e8c07a; }
+  ul { margin: 8px 0 0; padding-left: 20px; }
+  footer { color: #4d5a75; font-size: 12px; margin-top: 32px; }
+  code { background: #0e1626; padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1><span class="bolt">⚡</span> Web迅雷 · 下载中心</h1>
+  <div class="sub">m3u8 / 大文件多线程下载 · 断点续传 · MP4 转封装 —— 统一主页</div>
+
+  <div class="card warn">
+    <b>你看到了这段文字，说明油猴脚本尚未安装或未启用。</b><br>
+    正常情况下，「web-xunlei-downloader」脚本会把本页渲染为全屏下载中心（任务列表、速度曲线、目录与线程设置都在这里）。
+  </div>
+
+  <div class="card">
+    <b>使用方式</b>
+    <ul>
+      <li>安装 Tampermonkey 扩展与 <code>web-xunlei-downloader.user.js</code> 脚本；</li>
+      <li>在任意视频站点嗅探到资源后投送任务，本站即为常驻下载端；</li>
+      <li>脚本设置里的「统一主页 URL」应保持指向本页，并以 <code>#wtm-home</code> 结尾。</li>
+    </ul>
+  </div>
+
+  <footer>此页面为纯静态壳页，无任何外部依赖与统计代码。</footer>
+</main>
+</body>
+</html>
