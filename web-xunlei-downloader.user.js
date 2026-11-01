@@ -2,7 +2,7 @@
 // @name         Web迅雷【m3u8嗅探+断点续传下载管理器】
 // @name:zh-CN   Web迅雷【m3u8嗅探+断点续传下载管理器】
 // @name:en      Web Thunder - Download Manager
-// @version      2.4.0
+// @version      2.4.1
 // @description  类迅雷的网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:zh-CN 类迅雷的网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:en A Thunder-like web download manager: download hub UI, multi-threaded chunked download, resume, pause/continue, task dedup, url replacement, m3u8 sniffing & merging.
@@ -321,7 +321,7 @@
         sanitizeName: true,  // 文件名跨平台自动修正（默认开）：净化 Windows/macOS/Linux/Android 非法字符与保留名，避免无法直接保存
     };
     let settings = Object.assign({}, DEFAULT_SETTINGS);
-    const SCRIPT_VER = "2.4.0";
+    const SCRIPT_VER = "2.4.1";
     // 调试日志：只依赖 settings.debug，关闭时直接 return；错误/警告日志不受此开关影响始终输出
     function dlog(...args) {
         if (!settings.debug) return;
@@ -456,7 +456,7 @@
     function gxhr(rt, opt) { return rt ? xhrWithHandle(rt, opt) : xhr(opt); }
     async function fetchText(url, referer, rt) {
         const r = await gxhr(rt, { method: "GET", url, headers: referer ? { Referer: referer } : {}, timeout: 30000 });
-        if (r.status < 200 || r.status >= 400) throw new Error("HTTP " + r.status);
+        if (r.status < 200 || r.status >= 400) { dlog("fetchText 失败", "HTTP " + r.status, String(url).slice(0, 140), "referer=" + (referer || "无")); throw new Error("HTTP " + r.status); }
         return r.responseText || "";
     }
     async function loadManifest(url, referer, depth = 0, rt = null) {
@@ -541,11 +541,16 @@
     /* ---- 分片下载 ---- */
     async function fetchChunk(task, i, rt) {
         if (task.type === "m3u8") {
-            const r = await xhrWithHandle(rt, {
+            let r = await xhrWithHandle(rt, {
                 method: "GET", url: rt.segments[i], responseType: "arraybuffer",
                 headers: refHeader(task),
             });
-            if (r.status < 200 || r.status >= 400) throw new Error("HTTP " + r.status);
+            if ((r.status === 401 || r.status === 403) && task.referer) { // 部分 WAF 见跨源 Origin 头即 403：去 Origin 只留 Referer 重试一次
+                dlog("分片 403→去 Origin 重试", i, "referer=" + task.referer);
+                const h = refHeader(task); delete h.Origin;
+                r = await xhrWithHandle(rt, { method: "GET", url: rt.segments[i], responseType: "arraybuffer", headers: h });
+            }
+            if (r.status < 200 || r.status >= 400) { dlog("分片失败", i, "HTTP " + r.status, "referer=" + (task.referer || "无")); throw new Error("HTTP " + r.status); }
             return new Blob([r.response], { type: "video/mp2t" });
         }
         const headers = refHeader(task);
@@ -556,12 +561,18 @@
             headers.Range = `bytes=${start}-${end}`;
             expect = 206;
         }
-        const r = await xhrWithHandle(rt, {
+        let r = await xhrWithHandle(rt, {
             method: "GET", url: task.url, headers, responseType: "arraybuffer",
             onprogress: ev => { try { if (ev && ev.lengthComputable) rt.live.set(i, Math.min(ev.loaded, task.resumable ? task.chunkSize : (task.totalSize || ev.loaded))); } catch { } },
         });
         rt.live.delete(i);
-        if (r.status !== expect) throw new Error("HTTP " + r.status + (task.resumable ? "（Range 失效？可用「换址」重试）" : ""));
+        if ((r.status === 401 || r.status === 403) && headers.Origin && task.referer) { // 同上：403 时去 Origin 重试
+            dlog("文件分片 403→去 Origin 重试", i, "referer=" + task.referer);
+            delete headers.Origin;
+            r = await xhrWithHandle(rt, { method: "GET", url: task.url, headers, responseType: "arraybuffer" });
+            rt.live.delete(i);
+        }
+        if (r.status !== expect) { dlog("文件分片失败", i, "HTTP " + r.status, "referer=" + (task.referer || "无")); throw new Error("HTTP " + r.status + (task.resumable ? "（Range 失效？可用「换址」重试）" : "")); }
         if (!r.response || (task.totalSize > 0 && r.response.byteLength === 0)) throw new Error("空响应");
         return new Blob([r.response]);
     }
@@ -1228,6 +1239,12 @@
       .wtm-confirm .curl{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#7f95b8;font-size:11px;}
       .wtm-confirm .cnote{color:#7286a6;font-size:11px;margin-top:8px;line-height:1.6;}
       .wtm-confirm .cfoot{display:flex;gap:8px;justify-content:flex-end;margin-top:10px;}
+      .wtm-snifffly{position:fixed;top:140px;right:14px;width:300px;max-width:calc(100vw - 28px);background:#151a23;border:1px solid #2a3550;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.55);color:#dfe6f1;font-size:12px;z-index:2147483644;display:none;flex-direction:column;overflow:hidden;}
+      .wtm-snifffly.open{display:flex;}
+      .wtm-snifffly .sf-head{display:flex;align-items:center;gap:6px;padding:8px 10px;background:#121722;border-bottom:1px solid #262f42;}
+      .wtm-snifffly .sf-title{font-weight:bold;color:#fff;}
+      .wtm-snifffly .sf-list{max-height:240px;overflow:auto;padding:4px;}
+      .wtm-snifffly .sf-foot{display:flex;gap:6px;justify-content:flex-end;padding:6px 10px;border-top:1px solid #262f42;background:#121722;}
       .btn{background:#243044;color:#cfe2ff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px;line-height:1.5;}
       .btn:hover{background:#2d3d59;}
       .btn.primary{background:#1e6fff;color:#fff;}
@@ -1285,6 +1302,11 @@
       <div class="wtm-float" id="float">
         <div class="wtm-fab" id="fab" title="Web迅雷下载管理器（点击打开 / 拖动移位）"><span class="wtm-fab-ico">⚡</span><span class="wtm-badge" id="badge">0</span><span class="wtm-sbadge" id="sbadge" title="嗅探到的资源数">0</span><span class="wtm-snip" id="snip">📡 嗅探到 <b id="snipn">0</b> 个 <span class="tp" id="sniptype"></span></span></div>
       </div>
+      <div class="wtm-snifffly" id="sniff-pop">
+        <div class="sf-head"><span class="sf-title">📡 嗅探到资源</span><span id="sf-count"></span><span class="grow"></span><button class="btn ghost mini" data-act="sf-close" title="收起小窗">✕</button></div>
+        <div class="sf-list" id="sf-list"></div>
+        <div class="sf-foot"><button class="btn ghost mini" data-act="sniff-clear">清空</button><button class="btn mini" data-act="sf-openpanel">查看全部</button></div>
+      </div>
       <div class="wtm-panel" id="panel">
         <div class="wtm-head">
           <span class="wtm-logo">⚡ Web迅雷<span class="wtm-ver">v2.4</span></span>
@@ -1308,7 +1330,7 @@
           <span class="grow" style="display:flex;align-items:center;gap:6px;flex-basis:100%;font-size:12px">📁 保存文件夹：<b id="s-dirname">浏览器默认下载目录</b><button class="btn ghost mini" data-act="pick-dir">选择…</button></span>
           <label class="ck"><input type="checkbox" id="s-mp4">TS/m3u8 完成后默认转封装 MP4</label>
           <label class="ck"><input type="checkbox" id="s-sniff">页面资源嗅探</label>
-          <label class="ck"><input type="checkbox" id="s-show-sniff">新资源自动弹出面板</label>
+          <label class="ck"><input type="checkbox" id="s-show-sniff">新资源自动弹出小窗提示</label>
           <label class="ck"><input type="checkbox" id="s-fab">显示 ⚡ 悬浮球</label>
           <label class="ck"><input type="checkbox" id="s-debug">调试日志（F12 控制台）</label>
           <label class="ck"><input type="checkbox" id="s-sanitize">文件名跨平台自动修正</label>
@@ -1371,7 +1393,7 @@
         const q = s => box.querySelector(s);
         Object.assign(els, {
             float: q("#float"), fab: q("#fab"), badge: q("#badge"), sbadge: q("#sbadge"), snipn: q("#snipn"), sniptype: q("#sniptype"), fabIco: q(".wtm-fab-ico"),
-            panel: q("#panel"), list: q("#list"), total: q("#total"),
+            sniffPop: q("#sniff-pop"), sfCount: q("#sf-count"), sfList: q("#sf-list"), panel: q("#panel"), list: q("#list"), total: q("#total"),
             input: q("#url-input"), settingsBox: q("#settings"), maxbtn: q("#maxbtn"),
             cActive: q("#c-active"), cAll: q("#c-all"), cSniff: q("#c-sniff"),
             cfModal: q("#cf-modal"), cfUrl: q("#cf-url"), cfName: q("#cf-name"), cfDir: q("#cf-dir"), cfThreads: q("#cf-threads"), cfNow: q("#cf-now"), cfMp4: q("#cf-mp4"),
@@ -1448,6 +1470,7 @@
     function openPanel(max) {
         if (!els.panel) return;
         state.panelOpen = true;
+        hideSniffPop(); // 开大面板时收起嗅探小窗，避免两个窗体叠加
         els.panel.classList.add("open");
         if (max && !state.maximized) toggleMax();
         fillSettings();
@@ -1506,8 +1529,8 @@
         sniffItems.push({ url, onDownload, type, duration, path });
         renderSniff();
         pulseSniffFab(); // 新资源到达：悬浮球脉冲反馈
-        // 单一面板原则：新资源自动打开的是同一个下载面板（嗅探标签），不再弹独立窗口
-        if (settings.showSniff && !state.panelOpen) { state.tab = "sniff"; openPanel(); }
+        // 新资源：只弹右上角紧凑小窗（可逐条下载），不再自动展开整块大面板
+        if (settings.showSniff && !state.panelOpen) showSniffPop();
     }
 
     // 接收其它框架（iframe）嗅探到的资源，并入本页嗅探列表
@@ -1520,6 +1543,25 @@
         if (sniffItems.some(x => x.url === p.url)) return;
         showSniffItem({ type: p.type, url: p.url, duration: p.duration, onDownload: () => askConfirm({ url: p.url, type: p.type }) });
     }
+
+    /* ---- 嗅探小窗（右上角紧凑卡片，不抢占整屏）---- */
+    function renderSniffPop() {
+        if (!els.sfList) return;
+        const n = sniffItems.length;
+        if (els.sfCount) els.sfCount.textContent = n ? "（" + n + "）" : "";
+        els.sfList.innerHTML = n ? sniffItems.map((it, idx) => `
+            <div class="wtm-sitem">
+                <span class="tag ${it.type === "m3u8" ? "m3u" : ""}">${it.type}</span>
+                <span class="slink" title="${esc(it.url)}" data-act="sniff-copy" data-idx="${idx}">${esc(it.path)}</span>
+                <span class="sdur">${esc(it.duration || "")}</span>
+                <button class="btn mini primary" data-act="sniff-dl" data-idx="${idx}">下载</button>
+            </div>`).join("") : '<div class="wtm-empty" style="padding:12px;text-align:center">暂未嗅探到资源</div>';
+    }
+    function showSniffPop() {
+        renderSniffPop();
+        if (els.sniffPop) els.sniffPop.classList.add("open");
+    }
+    function hideSniffPop() { if (els.sniffPop) els.sniffPop.classList.remove("open"); }
 
     function renderSniff() {
         if (!els.cSniff) return; // UI 未就绪：buildUI 后会再次调用
@@ -1701,6 +1743,14 @@
                         if (it) { mgmapi.copyText(it.url); mgmapi.message("已复制链接", 2000); }
                         break;
                     }
+                    case "sf-close":
+                        hideSniffPop();
+                        break;
+                    case "sf-openpanel":
+                        hideSniffPop();
+                        state.tab = "sniff";
+                        openPanel();
+                        break;
                     case "cf-pickdir":
                         await pickSaveDir();
                         break;
@@ -1730,6 +1780,7 @@
                     case "sniff-clear":
                         sniffItems.length = 0;
                         render();
+                        renderSniffPop(); // 小窗同步刷新（空则显“暂未嗅探”）
                         break;
                 }
             } catch (err) {

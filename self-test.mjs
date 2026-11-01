@@ -264,6 +264,23 @@ await ok("嗅探反馈接线：脉冲触发/常驻角标/提示条元素与 3s �
     assert.ok(/IN_FRAME \|\| !els\.fab/.test(src), "pulseSniffFab 应护栏 iframe 与 UI 未就绪");
 });
 
+console.log("[嗅探小窗与 403 缓解]");
+await ok("嗅探小窗：新资源只弹紧凑卡片而非整块大面板", () => {
+    assert.match(src, /id="sniff-pop"/, "UI 应含嗅探小窗容器");
+    assert.ok(/!state\.panelOpen\) showSniffPop\(\);/.test(src), "showSniffItem 应弹小窗而非 openPanel");
+    assert.ok(!/!state\.panelOpen\) \{ state\.tab = "sniff"; openPanel\(\); \}/.test(src), "旧的自动开大面板分枝应已移除");
+    assert.ok(/hideSniffPop\(\); \/\/ \u5f00\u5927\u9762\u677f/.test(src), "openPanel 应收起小窗");
+    assert.match(src, /data-act="sf-openpanel"/, "小窗应有查看全部按钮");
+    assert.ok(/case "sf-close"[\s\S]*?case "sf-openpanel"/.test(src), "分发器应处理 sf-close/sf-openpanel");
+});
+await ok("403 缓解：仅在 401/403 且带 referer 时去 Origin 重试一次", () => {
+    assert.ok(/delete h\.Origin;/.test(src), "m3u8 分片 403 应去 Origin 重试");
+    assert.ok(/delete headers\.Origin;/.test(src), "文件分片 403 应去 Origin 重试");
+    assert.ok(/r\.status === 401 \|\| r\.status === 403/.test(src), "重试应仅在 401/403 触发");
+    const bare = lines.filter(l => /await xhr\(/.test(l));
+    assert.equal(bare.length, 0, "重试仍需用可中止通道");
+});
+
 setTimeout(() => {
     console.log(`\n全部通过：${n} 组断言 ✅`);
 }, 50);
