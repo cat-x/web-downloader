@@ -2,7 +2,7 @@
 // @name         Web下载器【m3u8嗅探+断点续传下载管理器】
 // @name:zh-CN   Web下载器【m3u8嗅探+断点续传下载管理器】
 // @name:en      Web Downloader - m3u8 Sniffing & Resumable Download Manager
-// @version      2.7.0
+// @version      2.7.1
 // @description  网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:zh-CN 网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:en A web download manager: download hub UI, multi-threaded chunked download, resume, pause/continue, task dedup, url replacement, m3u8 sniffing & merging.
@@ -327,7 +327,7 @@
         sanitizeName: true,  // 文件名跨平台自动修正（默认开）：净化 Windows/macOS/Linux/Android 非法字符与保留名，避免无法直接保存
     };
     let settings = Object.assign({}, DEFAULT_SETTINGS);
-    const SCRIPT_VER = "2.7.0";
+    const SCRIPT_VER = "2.7.1";
     // 诊断日志：始终记入环形缓冲（dlog.buf，最近 500 条）供面板一键复制；settings.debug 只控制是否同步打到 F12 控制台
     function dlog(...args) {
         try {
@@ -1404,7 +1404,7 @@
           <div class="crow"><span class="clb">线程数</span><input type="number" id="cf-threads" min="1" max="8" style="flex:none;width:72px"><span class="clb" style="width:auto">立即开始</span><input type="checkbox" id="cf-now"></div>
           <div class="crow"><span class="clb" style="width:auto"><input type="checkbox" id="cf-mp4"> 完成后转 MP4</span><span class="cnote" style="margin-top:0">无损重封装（-c copy）；首次使用联网加载组件，失败不影响 TS 成品</span></div>
           <div class="crow"><span class="clb" style="width:auto"><input type="checkbox" id="cf-sanitize"> 文件名跨平台自动修正</span><span class="cnote" style="margin-top:0">取消则按原名保存（可能含目标系统非法字符无法保存）</span></div>
-          <div class="cnote">超过并发数的任务会自动排队；取消勾选「立即开始」则放入暂停列表，稍后手动继续。指定文件夹需 Chrome/Edge 并在统一主页授权（保存时不再弹框，直接写入；注意浏览器禁止直接选中「下载/桌面/文稿」本身，请在其中建子文件夹再选）。</div>
+          <div class="cnote">超过并发数的任务会自动排队；取消勾选「立即开始」则放入暂停列表，稍后手动继续。「更改文件夹」在本页直接打开选择器（需 Chrome/Edge，https 页面），授权后保存不再弹框直接写入；注意浏览器禁止直接选中「下载/桌面/文稿」本身，请在其中建子文件夹再选。</div>
           <div class="cfoot"><button class="btn ghost" data-act="cf-cancel">取消</button><button class="btn primary" data-act="cf-ok">开始下载</button></div>
         </div>
       </div>`;
@@ -1621,9 +1621,10 @@
             : "浏览器下载目录（可点右侧「更改文件夹」授权固定目录）";
     }
     async function pickSaveDir() {
-        if (!window.showDirectoryPicker) { mgmapi.message("当前页面不是安全上下文（需 Chrome/Edge 且主页为 https），将使用浏览器下载目录"); return; }
-        if (!isEngine()) { mgmapi.message("统一主页才是实际下载端，请在主页标签里更改保存文件夹"); openHomeNewTab(); return; }
+        if (!window.showDirectoryPicker) { mgmapi.message("当前页面不支持文件夹选择（需 Chrome/Edge 且为 https 安全上下文），将使用浏览器下载目录"); return; }
         try {
+            // 当场在当前页面打开原生文件夹选择器（不跳转主页）：句柄存于选择所在域的 IndexedDB，
+            // 该域作为统一主页时直接生效；静默写入由主页执行（成品在主页域），浏览器不允许文件夹句柄跨域携带
             const h = await window.showDirectoryPicker({ mode: "readwrite", id: "wtm-save-dir", startIn: "downloads" });
             await Store.setMeta("savedir", h);
             dirHandle = h;
@@ -1631,7 +1632,9 @@
             await persistSettings();
             updateConfirmDirText();
             if (els.sDirName) els.sDirName.textContent = h.name;
-            mgmapi.message(`已指定保存文件夹：${h.name}`);
+            mgmapi.message(isEngine()
+                ? `已指定保存文件夹：${h.name}`
+                : `已选择文件夹「${h.name}」（名称已同步各页面）。实际写入由统一主页执行，浏览器不允许文件夹权限跨站携带：要在主页也静默写入这个目录，请在主页标签里选一次同一文件夹`, 12000);
         } catch (e) {
             if (e && (e.name === "AbortError" || (e.name === "NotAllowedError" && /permission is denied|denied by the user/i.test(e.message || "")))) return; // 用户主动取消，不打扰
             // Chrome 安全策略（规范明文，跨平台一致）：禁止直接选中 下载/文稿/桌面/主目录 本身，哪怕完全空也报“含系统文件”；其子文件夹允许

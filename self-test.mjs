@@ -6,9 +6,9 @@ import assert from "assert";
 const src = readFileSync(new URL("./web-xunlei-downloader.user.js", import.meta.url), "utf8");
 const lines = src.split("\n");
 
-/* 按行切取顶层函数源码：签名行开始，直到恰好 "    }" 的收尾行（函数体内部收尾缩进更深） */
+/* 按行切取顶层函数源码（含 async function）：签名行开始，直到恰好 "    }" 的收尾行（函数体内部收尾缩进更深） */
 function sliceFn(name) {
-    const i = lines.findIndex(l => l.trim().startsWith(`function ${name}(`) && /^(\s{4})function/.test(l));
+    const i = lines.findIndex(l => { const t = l.trim(); return (t.startsWith(`function ${name}(`) || t.startsWith(`async function ${name}(`)) && /^(\s{4})(async )?function/.test(l); });
     assert.ok(i >= 0, `源码中找不到函数: ${name}`);
     if (!lines[i].trim().endsWith("{")) return lines[i]; // 单行函数
     const out = [lines[i]];
@@ -219,6 +219,17 @@ await ok("诊断报告：设置区按钮/GM_setClipboard 授权/降级通道/头
     assert.ok(/GM_setClipboard\(txt/.test(src), "优先走 GM 剪贴板通道");
     assert.ok(/navigator\.clipboard\.writeText\(txt\)/.test(src), "无 GM 时降级页内剪贴板 API");
     assert.ok(/设置: \$\{JSON\.stringify\(settings\)\}/.test(src), "报告应含设置快照");
+});
+
+console.log("[保存文件夹本页选择]");
+await ok("更改文件夹就地打开选择器，不再跳转主页标签", () => {
+    const body = sliceFn("pickSaveDir");
+    assert.ok(!/openHomeNewTab/.test(body), "pickSaveDir 不应跳转主页标签");
+    const guardPart = body.split("try {")[0];
+    assert.ok(!/isEngine\(\)/.test(guardPart), "非引擎页也应能直接打开选择器（无拦截）");
+    assert.ok(/showDirectoryPicker\(\{/.test(body), "应直接调用原生文件夹选择器");
+    assert.ok(/Store\.setMeta\("savedir", h\)/.test(body), "句柄应存于选择所在域的 IndexedDB");
+    assert.ok(/isEngine\(\)[\s\S]*已指定保存文件夹[\s\S]*静默写入/.test(body), "非主页应提示跨站权限限制");
 });
 
 console.log("[动态文件名取名]");
