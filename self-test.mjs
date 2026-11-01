@@ -22,7 +22,7 @@ function sliceFn(name) {
 
 const names = ["fmtSize", "fmtEta", "nameFromUrl", "ensureExt", "nameFromDisposition",
     "headerOf", "parseM3U", "clamp", "sameBase", "mergeTasks", "xhrWithHandle",
-    "looksLikeMeaningfulFile", "cleanFileName"];
+    "looksLikeMeaningfulFile", "cleanFileName", "clampNameBytes", "sanitizeFileName"];
 const code = `
 const deletedTs = g.deletedTs, rts = g.rts, mgmapi = g.mgmapi;
 ${names.map(sliceFn).join("\n")}
@@ -225,6 +225,27 @@ await ok("取名链路：suggestName 已接管四类下载入口（视频/m3u8/�
     assert.match(src, /await suggestName\(url, type\)/, "askConfirm 默认名应走动态取名");
     assert.ok(!/try \{ name = nameFromUrl\(v\.src\)/.test(src), "视频入口不应再静态吃 URL 名，应交动态取名");
     assert.ok(!/async onDownload\(\) \{\s*let title/.test(src), "m3u8 入口取名逻辑应下沉到 suggestName");
+});
+
+console.log("[跨平台文件名净化]");
+await ok("sanitizeFileName：非法字符/保留名/首尾点空格/多字节截断均安全", () => {
+    assert.equal(F.sanitizeFileName("a\\b/c:d*e?f\"g<h>i|j"), "a_b_c_d_e_f_g_h_i_j", "Windows+macOS 非法字符→下划线");
+    assert.equal(F.sanitizeFileName("CON.txt"), "_CON.txt", "Windows 保留名需转义");
+    assert.equal(F.sanitizeFileName("lpt9.zip"), "_lpt9.zip", "LPT 保留名（大小写不敏感）");
+    assert.equal(F.sanitizeFileName("  尾点尾空格.  "), "尾点尾空格", "去尾随点/空格与首尾空白");
+    assert.equal(F.sanitizeFileName(".hidden"), "hidden", "去前导点避免隐藏文件");
+    assert.ok(/^[\w\u4e00-\u9fff ._\[\]-]+[.]mp4$/.test(F.sanitizeFileName("影片:第1集 [1080P]?.mp4")), "冒号/问号净化但保留扩展名");
+    assert.equal(F.sanitizeFileName("a：b.txt"), "a：b.txt", "全角冒号合法不应被替换");
+    const long = F.sanitizeFileName("标".repeat(300) + ".mp4"); // 多字节不切断代理/多字节
+    assert.ok(new TextEncoder().encode(long).length <= 120, "UTF-8 字节不超 120");
+    assert.ok(long.endsWith(".mp4"), "截断应保留扩展名");
+});
+await ok("净化开关：默认勾选、设置采集与 addTask 收口均就位", () => {
+    assert.match(src, /sanitizeName:\s*true,/, "DEFAULT_SETTINGS.sanitizeName 应默认 true");
+    assert.ok(/settings\.sanitizeName = !!\(els\.sSanitize/.test(src), "save-settings 应采集 sSanitize");
+    assert.match(src, /id="s-sanitize"/, "设置面板应有跨平台修正复选框");
+    assert.ok(/name: finalName\(spec, url, type\)/.test(src), "addTask 唯一点应走 finalName 收口");
+    assert.match(src, /if \(settings\.sanitizeName !== false\)/, "finalName 受开关控制（旧数据无此键时默认开）");
 });
 
 setTimeout(() => {

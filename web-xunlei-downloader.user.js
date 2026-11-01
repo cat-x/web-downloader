@@ -2,7 +2,7 @@
 // @name         Web迅雷【m3u8嗅探+断点续传下载管理器】
 // @name:zh-CN   Web迅雷【m3u8嗅探+断点续传下载管理器】
 // @name:en      Web Thunder - Download Manager
-// @version      2.2.1
+// @version      2.3.0
 // @description  类迅雷的网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:zh-CN 类迅雷的网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:en A Thunder-like web download manager: download hub UI, multi-threaded chunked download, resume, pause/continue, task dedup, url replacement, m3u8 sniffing & merging.
@@ -121,6 +121,44 @@
     }
     function cleanFileName(t) {
         return String(t || "").replace(/[\\/:*?"<>|]/g, "_").replace(/\s+/g, " ").trim().slice(0, 100);
+    }
+    // 按 UTF-8 字节安全截断文件名（保留扩展名，绝不切断多字节/代理对字符）
+    function clampNameBytes(s, maxBytes) {
+        const enc = new TextEncoder();
+        if (enc.encode(s).length <= maxBytes) return s;
+        const m = /[.]([\w]{1,6})$/i.exec(s);
+        const ext = m ? m[0] : "";
+        const stem = s.slice(0, s.length - ext.length);
+        const keep = Math.max(1, maxBytes - enc.encode(ext).length);
+        let out = "";
+        for (const ch of stem) {
+            const t = out + ch;
+            if (enc.encode(t).length > keep) break;
+            out = t;
+        }
+        return (out || "download") + ext;
+    }
+    // 跨平台文件名净化：Windows 非法字符与保留名、macOS 冒号、控制字符、首尾点/空格、长度上限（NTFS/APFS/ext4/FAT 取交集）
+    function sanitizeFileName(name) {
+        let s = String(name || "").normalize("NFC");
+        s = s.replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e]/g, ""); // 控制符 + 零宽/方向标记
+        s = s.replace(/[\\/:*?"<>|]/g, "_");                                   // \ / : * ? " < > |（含 macOS 冒号）
+        s = s.replace(/^\.+/, "").replace(/[. ]+$/, "").trim();               // Windows：禁前导点（隐藏）与尾随点/空格
+        s = s.replace(/\s{2,}/g, " ").replace(/_{2,}/g, "_").replace(/^_+|_+$/g, "");
+        if (!s) s = "download-" + Date.now();
+        const m = /^([^.]*)([.]|$)/.exec(s);
+        if (m && /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i.test(m[1])) s = "_" + s; // Windows 保留名（带扩展也非法）
+        return clampNameBytes(s, 120);
+    }
+    // 任务最终文件名：补扩展名 +（开启时）跨平台净化。addTask 唯一收口，覆盖嗅探/手动/中继/用户手输所有入口
+    function finalName(spec, url, type) {
+        const ext = type === "m3u8" ? ".ts" : ".bin";
+        let nm = ensureExt((spec && spec.name ? String(spec.name) : "").trim() || nameFromUrl(url), ext);
+        if (settings.sanitizeName !== false) {
+            const fixed = sanitizeFileName(nm);
+            nm = /\.\w{1,6}$/.test(fixed) ? fixed : ensureExt(fixed, ext); // 净化万一吃掉扩展名则兜底补回
+        }
+        return nm;
     }
     // 动态文件名：普通文件直链优先用 URL 名；m3u8 或占位名则取“点击下载一刻”的顶层页面标题（对齐老脚本 getTopTitle 体验）
     async function suggestName(url, type) {
@@ -280,9 +318,10 @@
         saveDirName: "",     // 已授权的本地保存文件夹名（File System Access API，引擎页生效）
         convertMp4: true,    // m3u8/TS 完成后默认转封装 MP4（确认面板可改）
         debug: false,        // 调试日志：开启后 F12 控制台输出 [wtm][dbg] 全链路决策日志（默认关，关闭时零开销）
+        sanitizeName: true,  // 文件名跨平台自动修正（默认开）：净化 Windows/macOS/Linux/Android 非法字符与保留名，避免无法直接保存
     };
     let settings = Object.assign({}, DEFAULT_SETTINGS);
-    const SCRIPT_VER = "2.2.1";
+    const SCRIPT_VER = "2.3.0";
     // 调试日志：只依赖 settings.debug，关闭时直接 return；错误/警告日志不受此开关影响始终输出
     function dlog(...args) {
         if (!settings.debug) return;
@@ -797,7 +836,7 @@
             id: "t" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
             type,
             url,
-            name: ensureExt(spec.name || nameFromUrl(url), type === "m3u8" ? ".ts" : ".bin"),
+            name: finalName(spec, url, type), // 唯一收口：补扩展名 + 开启时跨平台净化（覆盖所有入口）
             referer: spec.referer || location.href,
             named: !!spec.name,
             threads: clamp(parseInt(spec.threads) || 0, 0, 8), // 每任务独立线程数，0=跟随全局默认
@@ -1240,7 +1279,7 @@
       </div>
       <div class="wtm-panel" id="panel">
         <div class="wtm-head">
-          <span class="wtm-logo">⚡ Web迅雷<span class="wtm-ver">v2.2</span></span>
+          <span class="wtm-logo">⚡ Web迅雷<span class="wtm-ver">v2.3</span></span>
           <span class="wtm-total" id="total">↓ 空闲</span>
           <span class="grow"></span>
           <button class="btn ghost" data-act="home" title="打开统一下载主页（固定网址，所有任务在此集中管理）">🏠 主页</button>
@@ -1264,6 +1303,7 @@
           <label class="ck"><input type="checkbox" id="s-show-sniff">新资源自动弹出面板</label>
           <label class="ck"><input type="checkbox" id="s-fab">显示 ⚡ 悬浮球</label>
           <label class="ck"><input type="checkbox" id="s-debug">调试日志（F12 控制台）</label>
+          <label class="ck"><input type="checkbox" id="s-sanitize">文件名跨平台自动修正</label>
           <label class="grow" style="flex-basis:100%">统一主页 URL <input type="text" id="s-homeurl" style="width:240px" placeholder="https://cat-x.github.io/web-downloader/#wtm-home"></label>
           <button class="btn primary mini" data-act="save-settings">保存设置</button>
         </div>
@@ -1328,7 +1368,7 @@
             cActive: q("#c-active"), cAll: q("#c-all"), cSniff: q("#c-sniff"),
             cfModal: q("#cf-modal"), cfUrl: q("#cf-url"), cfName: q("#cf-name"), cfDir: q("#cf-dir"), cfThreads: q("#cf-threads"), cfNow: q("#cf-now"), cfMp4: q("#cf-mp4"),
             sDirName: q("#s-dirname"),
-            sThreads: q("#s-threads"), sChunk: q("#s-chunk"), sConc: q("#s-conc"), sAuto: q("#s-auto"), sSniff: q("#s-sniff"), sShowSniff: q("#s-show-sniff"), sFab: q("#s-fab"), sHomeUrl: q("#s-homeurl"), sMp4: q("#s-mp4"), sDebug: q("#s-debug"),
+            sThreads: q("#s-threads"), sChunk: q("#s-chunk"), sConc: q("#s-conc"), sAuto: q("#s-auto"), sSniff: q("#s-sniff"), sShowSniff: q("#s-show-sniff"), sFab: q("#s-fab"), sHomeUrl: q("#s-homeurl"), sMp4: q("#s-mp4"), sDebug: q("#s-debug"), sSanitize: q("#s-sanitize"),
         });
 
         bindFab();
@@ -1497,7 +1537,7 @@
         pendingConfirm = { url, type, referer: spec.referer || location.href };
         els.cfUrl.textContent = url;
         els.cfUrl.title = url;
-        els.cfName.value = baseName;
+        els.cfName.value = settings.sanitizeName !== false ? sanitizeFileName(baseName) : baseName;
         els.cfThreads.value = (spec.threads > 0 ? spec.threads : settings.threads);
         els.cfNow.checked = spec.startNow !== false;
         const tsish = type === "m3u8" || /[.]ts([?#]|$)/i.test(url); // 只有 TS 类流才能无损转封装
@@ -1552,6 +1592,7 @@
                         settings.showSniff = !!els.sShowSniff.checked;
                         settings.convertMp4 = !!els.sMp4.checked;
                         settings.debug = !!(els.sDebug && els.sDebug.checked);
+                        settings.sanitizeName = !!(els.sSanitize && els.sSanitize.checked);
                         settings.showFab = !!els.sFab.checked;
                         const hu = (els.sHomeUrl.value || "").trim();
                         if (/^https?:\/\/.+/i.test(hu) && hu.indexOf("#wtm-home") > -1) settings.homeUrl = hu;
@@ -1674,6 +1715,7 @@
         els.sFab.checked = settings.showFab !== false;
         if (els.sMp4) els.sMp4.checked = settings.convertMp4 !== false;
         if (els.sDebug) els.sDebug.checked = !!settings.debug;
+        if (els.sSanitize) els.sSanitize.checked = settings.sanitizeName !== false;
         if (els.sDirName) els.sDirName.textContent = settings.saveDirName || "浏览器默认下载目录";
         els.sHomeUrl.value = settings.homeUrl;
     }
