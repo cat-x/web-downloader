@@ -2,7 +2,7 @@
 // @name         Web迅雷【m3u8嗅探+断点续传下载管理器】
 // @name:zh-CN   Web迅雷【m3u8嗅探+断点续传下载管理器】
 // @name:en      Web Thunder - Download Manager
-// @version      2.2.0
+// @version      2.2.1
 // @description  类迅雷的网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:zh-CN 类迅雷的网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
 // @description:en A Thunder-like web download manager: download hub UI, multi-threaded chunked download, resume, pause/continue, task dedup, url replacement, m3u8 sniffing & merging.
@@ -110,6 +110,33 @@
         if (!name || /^\s*$/.test(name)) name = "download-" + Date.now();
         if (!/\.\w{1,6}$/.test(name)) name += ext;
         return name;
+    }
+    // 判断 URL 尾段是否为“有实际意义”的文件名（排除 index/master 等流媒体占位名），决定要不要改用页面标题
+    function looksLikeMeaningfulFile(name) {
+        const m = /^(.+?)[.]([\w]{1,6})$/i.exec(String(name || "").trim());
+        if (!m) return false;
+        const stem = m[1].trim().toLowerCase();
+        if (stem.length < 2) return false;
+        return !/^(index|master|playlist|stream|video|audio|big|main|media|default|output|data|init|seg|segment|chunk|test|play|v|a|[\d._+-]+)$/.test(stem);
+    }
+    function cleanFileName(t) {
+        return String(t || "").replace(/[\\/:*?"<>|]/g, "_").replace(/\s+/g, " ").trim().slice(0, 100);
+    }
+    // 动态文件名：普通文件直链优先用 URL 名；m3u8 或占位名则取“点击下载一刻”的顶层页面标题（对齐老脚本 getTopTitle 体验）
+    async function suggestName(url, type) {
+        const fromUrl = nameFromUrl(url);
+        if (type !== "m3u8" && looksLikeMeaningfulFile(fromUrl)) return fromUrl;
+        let title = "";
+        try { title = await getTopTitleSafe(); } catch { }
+        let base = cleanFileName(title || document.title);
+        if (!base) return fromUrl;
+        if (type === "m3u8") return ensureExt(base, ".ts");
+        // 普通下载：标题无扩展名时沿用 URL 已有扩展（如 video.mp4 → 标题.mp4），忽略 nameFromUrl 兜底补的 .bin
+        if (!/\.\w{1,6}$/.test(base)) {
+            const m = /[.]([\w]{1,6})$/.exec(fromUrl);
+            if (m && m[1].toLowerCase() !== "bin") base += "." + m[1];
+        }
+        return base;
     }
     function nameFromDisposition(cd) {
         if (!cd) return "";
@@ -255,7 +282,7 @@
         debug: false,        // 调试日志：开启后 F12 控制台输出 [wtm][dbg] 全链路决策日志（默认关，关闭时零开销）
     };
     let settings = Object.assign({}, DEFAULT_SETTINGS);
-    const SCRIPT_VER = "2.2.0";
+    const SCRIPT_VER = "2.2.1";
     // 调试日志：只依赖 settings.debug，关闭时直接 return；错误/警告日志不受此开关影响始终输出
     function dlog(...args) {
         if (!settings.debug) return;
@@ -1063,14 +1090,12 @@
         for (const v of Array.from(document.querySelectorAll("video"))) {
             if (v.duration && v.src && v.src.startsWith("http") && !shownUrls.includes(v.src)) {
                 noteShown(v.src);
-                let name = "";
-                try { name = nameFromUrl(v.src); } catch { }
                 showSniffItem({
                     type: "video",
                     url: v.src,
                     duration: `${Math.ceil(v.duration * 10 / 60) / 10} 分钟`,
                     onDownload() {
-                        askConfirm({ type: "file", url: v.src, name, referer: location.href });
+                        askConfirm({ type: "file", url: v.src, referer: location.href }); // 名字交给 askConfirm 动态判定（URL 有意义名优先，否则取顶层标题）
                     }
                 });
             }
@@ -1093,11 +1118,8 @@
             type: "m3u8",
             url: u.href,
             duration: duration ? `${Math.ceil(duration * 10 / 60) / 10} 分钟` : (variantCount ? `多码率(${variantCount})` : "未知"),
-            async onDownload() {
-                let title = "";
-                try { title = await getTopTitleSafe(); } catch { }
-                const name = ensureExt((title || document.title || nameFromUrl(u.href)).replace(/[\\/:*?"<>|]/g, "_"), ".ts");
-                askConfirm({ type: "m3u8", url: u.href, name, referer: location.href });
+            onDownload() {
+                askConfirm({ type: "m3u8", url: u.href, referer: location.href }); // m3u8 名恒取动态顶层标题（.ts 由 suggestName 补），URL 名常为 index/master 无意义
                 if (variantCount) mgmapi.message("多码率播放列表：将自动选择最高画质变体");
             }
         });
@@ -1453,7 +1475,7 @@
             mgmapi.message("选择被拒：浏览器禁止网页直接选中「下载/桌面/文稿/主目录」本身（防盗取安全策略，各系统一致）。请在选择器里进入下载目录后新建一个子文件夹（如 Web迅雷）并选中它", 12000);
         }
     }
-    function askConfirm(spec) {
+    async function askConfirm(spec) {
         if (!els.cfModal) { dlog("askConfirm UI未就绪，跳过确认直接添加", String(spec.url || "").slice(0, 120)); addTask(spec); return null; } // UI 未就绪时不阻塞添加
         dlog("askConfirm 打开确认面板", spec.type || "", String(spec.url || "").slice(0, 120));
         let u;
@@ -1470,8 +1492,8 @@
             notifyUI();
             return dup;
         }
-        let baseName = spec.name || nameFromUrl(url);
-        if (type === "m3u8") baseName = ensureExt(baseName, ".ts");
+        // 动态文件名：调用方显式给名则用之（m3u8 补 .ts）；否则按“URL 名 vs 顶层标题”智能判定（点击下载一刻实时取标题，对齐老脚本）
+        const baseName = spec.name ? (type === "m3u8" ? ensureExt(spec.name, ".ts") : spec.name) : await suggestName(url, type);
         pendingConfirm = { url, type, referer: spec.referer || location.href };
         els.cfUrl.textContent = url;
         els.cfUrl.title = url;

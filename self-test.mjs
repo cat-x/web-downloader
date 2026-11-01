@@ -21,7 +21,8 @@ function sliceFn(name) {
 }
 
 const names = ["fmtSize", "fmtEta", "nameFromUrl", "ensureExt", "nameFromDisposition",
-    "headerOf", "parseM3U", "clamp", "sameBase", "mergeTasks", "xhrWithHandle"];
+    "headerOf", "parseM3U", "clamp", "sameBase", "mergeTasks", "xhrWithHandle",
+    "looksLikeMeaningfulFile", "cleanFileName"];
 const code = `
 const deletedTs = g.deletedTs, rts = g.rts, mgmapi = g.mgmapi;
 ${names.map(sliceFn).join("\n")}
@@ -202,6 +203,28 @@ await ok("debug 设置：默认关闭、UI 采集、埋点不走裸 console", ()
     assert.ok(/settings\.debug = !!\(els\.sDebug/.test(src), "save-settings 应采集 debug 开关");
     const bare = lines.filter(l => /^\s*console\.log\(/.test(l));
     assert.ok(bare.length <= 1, `console.log 只允许 dlog 内部一处，实际 ${bare.length} 处`);
+});
+
+console.log("[动态文件名取名]");
+await ok("looksLikeMeaningfulFile：真实文件名判定为有意义，流媒体占位名判定为无意义", () => {
+    assert.equal(F.looksLikeMeaningfulFile("权力的游戏S01E01.mp4"), true, "真实片名应优先用 URL 名");
+    assert.equal(F.looksLikeMeaningfulFile("movie_720p.mkv"), true);
+    assert.equal(F.looksLikeMeaningfulFile("index.ts"), false, "index 占位名应改用页面标题");
+    assert.equal(F.looksLikeMeaningfulFile("master.m3u8"), false);
+    assert.equal(F.looksLikeMeaningfulFile("video.mp4"), false, "video 泛化名应改用页面标题");
+    assert.equal(F.looksLikeMeaningfulFile("123456.mp4"), false, "纯数字名应改用页面标题");
+    assert.equal(F.looksLikeMeaningfulFile("noext"), false, "无扩展名不算有意义");
+});
+await ok("cleanFileName：过滤非法字符、折叠空白、截断长度", () => {
+    assert.equal(F.cleanFileName("a/b:c*d?e"), "a_b_c_d_e");
+    assert.equal(F.cleanFileName("  多  空格\t标题  "), "多 空格 标题");
+    assert.equal(F.cleanFileName("x".repeat(200)).length, 100, "应截断到 100 字符");
+    assert.equal(F.cleanFileName(null), "", "null 安全");
+});
+await ok("取名链路：suggestName 已接管四类下载入口（视频/m3u8/手动/中继）", () => {
+    assert.match(src, /await suggestName\(url, type\)/, "askConfirm 默认名应走动态取名");
+    assert.ok(!/try \{ name = nameFromUrl\(v\.src\)/.test(src), "视频入口不应再静态吃 URL 名，应交动态取名");
+    assert.ok(!/async onDownload\(\) \{\s*let title/.test(src), "m3u8 入口取名逻辑应下沉到 suggestName");
 });
 
 setTimeout(() => {
