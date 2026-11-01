@@ -2,10 +2,10 @@
 // @name         Web下载器【m3u8嗅探+断点续传下载管理器】
 // @name:zh-CN   Web下载器【m3u8嗅探+断点续传下载管理器】
 // @name:en      Web Downloader - m3u8 Sniffing & Resumable Download Manager
-// @version      2.7.1
-// @description  网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
-// @description:zh-CN 网页综合下载工具：下载主页面板、分块多线程下载、断点续传、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
-// @description:en A web download manager: download hub UI, multi-threaded chunked download, resume, pause/continue, task dedup, url replacement, m3u8 sniffing & merging.
+// @version      2.8.0
+// @description  网页综合下载工具：下载主页面板、分块多线程下载、断点续传（可直写本地文件）、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
+// @description:zh-CN 网页综合下载工具：下载主页面板、分块多线程下载、断点续传（可直写本地文件）、暂停/继续、任务排重、更换下载地址、m3u8 自动嗅探与分片合并、视频直链下载。
+// @description:en A web download manager: download hub UI, multi-threaded chunked download, resume (with direct local file writing), pause/continue, task dedup, url replacement, m3u8 sniffing & merging.
 // @author       cat-x
 // @license      MIT
 // @namespace    wtm-downloader
@@ -243,7 +243,7 @@
         function open() {
             if (dbp) return dbp;
             dbp = new Promise((resolve, reject) => {
-                const rq = indexedDB.open("wtm-downloader", 2);
+                const rq = indexedDB.open("wtm-downloader", 3);
                 rq.onupgradeneeded = () => {
                     const db = rq.result;
                     if (!db.objectStoreNames.contains("chunks")) {
@@ -256,6 +256,10 @@
                     if (!db.objectStoreNames.contains("meta")) {
                         db.createObjectStore("meta", { keyPath: "key" }); // 保存目录授权句柄等
                     }
+                    if (!db.objectStoreNames.contains("fileplan")) {
+                        const s = db.createObjectStore("fileplan", { keyPath: "key" });
+                        s.createIndex("taskId", "taskId");
+                    } // 直写本地文件模式：只存文件句柄 + 分片完成登记，不存任何文件内容
                 };
                 rq.onsuccess = () => resolve(rq.result);
                 rq.onerror = () => { dbp = null; reject(rq.error); }; // 失败时清除缓存，允许后续重试
@@ -304,10 +308,145 @@
             clearChunks(taskId) { // 按键范围一次事务清空，避免 N 个分片 N 次往返
                 return pexec("chunks", "readwrite", s => s.delete(IDBKeyRange.bound(taskId + ":", taskId + ":\uffff\uffff")));
             },
+            putPlan(rec) { return pexec("fileplan", "readwrite", s => s.put(rec)); },
+            getPlan(key) { return pexec("fileplan", "readonly", s => s.get(key)); },
+            deletePlan(key) { return pexec("fileplan", "readwrite", s => s.delete(key)); },
+            clearPlans(taskId) { return pexec("fileplan", "readwrite", s => s.delete(IDBKeyRange.bound(taskId + ":", taskId + ":\uffff\uffff"))); },
             putFile(rec) { return pexec("files", "readwrite", s => s.put(rec)); },
             getFile(key) { return pexec("files", "readonly", s => s.get(key)); },
             deleteFile(key) { return pexec("files", "readwrite", s => s.delete(key)); },
         };
+    })();
+
+    /* ==================== 直写本地文件（占位 + 分段落盘） ====================
+       已授权保存文件夹（设置/确认面板「更改文件夹」）时，任务开始即在生产目录创建 `任务名.wtmpart`，
+       分片按偏移 seek 直写落盘（不经 IndexedDB 内容缓存），断点续传只靠 fileplan 里的分片完成登记；
+       全部完成后收尾改名成品。浏览器不允许文件夹句柄跨站携带，故直写仅在句柄所属域（通常为统一主页）生效；
+       未授权或直写失败的任务自动回退旧的 IDB 分片缓存模式。 */
+    const LocalFile = (function () {
+        let chain = Promise.resolve(); // 写盘串行链：并发分片各自 seek+write，互不踩踏
+        const tempSuffix = ".wtmpart";
+        async function ensurePerm(dir) {
+            try {
+                let p = await dir.queryPermission({ mode: "readwrite" });
+                if (p !== "granted") p = await dir.requestPermission({ mode: "readwrite" });
+                return p === "granted";
+            } catch { return false; }
+        }
+        function planKey(taskId, index) { return `${taskId}:${index}`; }
+        async function loadPlan(task) {
+            if (!task.workingFile) return null;
+            const rec = await Store.getPlan(planKey(task.id, "f"));
+            return rec && rec.plan ? rec.plan : null;
+        }
+        /* 打开（或沿用）本地计划：可续传直链预分配总大小；m3u8 按完成分片累计偏移顺序写。失败返回 null=回退缓存模式 */
+        async function openPlan(dir, task) {
+            if (!("showDirectoryPicker" in window)) return null;
+            if (task.singleBlob || !task.resumable || task.totalChunks <= 0) return null;
+            let plan = await loadPlan(task);
+            const compatible = plan && plan.name === task.name && plan.type === task.type
+                && (task.type !== "file" || (plan.totalSize === task.totalSize && plan.chunkSize === task.chunkSize))
+                && !(plan.renamed && plan.status !== "done"); // 改名成品后没下完的残局，重开新文件
+            if (plan && !compatible) { await dropLocalFile(dir, task, "重建"); plan = null; }
+            if (!plan) {
+                if (!(await ensurePerm(dir))) return null;
+                plan = { name: task.name, tempName: task.name + tempSuffix, type: task.type, totalSize: task.totalSize || 0, chunkSize: task.chunkSize || 0, pairs: [], renamed: false, status: "writing", createdAt: Date.now() };
+                try {
+                    const fh = await dir.getFileHandle(plan.tempName, { create: true });
+                    const w = await fh.createWritable();
+                    if (task.resumable && task.type === "file" && task.totalSize > 0) { await w.seek(task.totalSize - 1); await w.write(new Uint8Array(1)); } // 占位：先建全长文件，下载中磁盘可见完整大小
+                    await w.close();
+                } catch (e) { dlog("openPlan 建文件失败", e && e.message); return null; }
+            }
+            try {
+                const fh = await dir.getFileHandle(plan.tempName);
+                const w = await fh.createWritable();
+                plan.handle = fh; plan.writer = w;
+            } catch { return null; } // 文件被用户在磁盘上删除
+            await Store.putPlan({ key: planKey(task.id, "f"), taskId: task.id, plan });
+            task.workingFile = true;
+            return plan;
+        }
+        function hasPlan(task) { return !!task.workingFile; }
+        async function closeWriter(plan) {
+            try { if (plan && plan.writer) { await plan.writer.close(); plan.writer = null; } } catch { }
+        }
+        /* 把一块字节 seek 写到成品偏移（串行链保证并发分片互不踩踏），成功后才计入分片登记；
+           写流全程常驻不关闭（关闭后不可再用），仅在异常时丢弃重建重试一次 */
+        async function writeAt(plan, offset, bytes, size, index) {
+            const job = chain.then(async () => {
+                const data = bytes instanceof Blob ? bytes : new Blob([bytes]);
+                for (let a = 0; a < 2; a++) {
+                    try {
+                        if (!plan.writer) plan.writer = await plan.handle.createWritable(); // 上一次写后已关闭：重新打开（保留原数据）
+                        plan.writer.seek(offset);
+                        plan.writer.write(data);
+                        break;
+                    } catch (e) {
+                        try { if (plan.writer) await plan.writer.close(); } catch { }
+                        plan.writer = null;
+                        if (a === 0) continue; // 句柄失效则重开写流重试一次
+                        throw e;
+                    }
+                }
+                if (!plan.pairs.some(p => p[0] === index)) plan.pairs.push([index, size]);
+                await Store.putPlan({ key: planKey(plan.taskId, "f"), taskId: plan.taskId, plan });
+            });
+            chain = job.then(() => { }, () => { });
+            return job;
+        }
+        function planOffset(plan, task, i) {
+            if (task.resumable && task.type === "file") return i * task.chunkSize;
+            let off = 0; for (const p of plan.pairs) off += p[1]; return off; // m3u8：顺序追加（worker 单线程内偏移与登记一致）
+        }
+        /* 收尾：关闭写流，把 .wtmpart 改名为成品（同名冲突自动加序号），返回成品 File */
+        async function finalize(dir, task) {
+            const plan = await loadPlan(task);
+            if (!plan) return null;
+            await closeWriter(plan);
+            if (!plan.renamed) {
+                if (!(await ensurePerm(dir))) throw new Error("保存文件夹权限失效，请在设置里重新选择文件夹后重试");
+                const target = await pickName(dir, plan.name);
+                await dir.moveEntry(plan.tempName, target); plan.tempName = target; plan.renamed = true; plan.finalName = target;
+            }
+            plan.status = "done";
+            await Store.putPlan({ key: planKey(task.id, "f"), taskId: task.id, plan });
+            const f = await plan.handle.getFile();
+            return f;
+        }
+        async function pickName(dir, want) {
+            const used = new Set();
+            try { for await (const [name] of dir.entries()) used.add(name); } catch { }
+            if (!used.has(want)) return want;
+            const m = /^(.*)(\.[A-Za-z0-9]{1,6})$/.exec(want) || [want, want, ""];
+            for (let n = 2; n < 1000; n++) { const cand = `${m[1]} (${n})${m[2]}`; if (!used.has(cand)) return cand; }
+            return want + "." + Date.now();
+        }
+        /* 放弃本地文件：删 .part 与分片登记，任务回退 IDB 缓存模式从头下载 */
+        async function dropLocalFile(dir, task, reason) {
+            try {
+                const rec = await Store.getPlan(planKey(task.id, "f"));
+                const plan = rec && rec.plan;
+                task.workingFile = false;
+                await Store.deletePlan(planKey(task.id, "f"));
+                await Store.clearPlans(task.id);
+                if (!plan) return;
+                await closeWriter(plan);
+                if (plan.status === "done") { try { await dir.removeEntry(plan.tempName); } catch { } return; } // 残留成品由用户自行处理，不静默删除
+                try { await dir.removeEntry(plan.tempName); } catch { }
+                if (reason !== "重建") mgmapi.message(`已放弃本地直写（${reason}），改用浏览器内缓存继续`, 6000);
+            } catch { task.workingFile = false; }
+        }
+        /* 转封装等场景：取成品 File（未改名时为 .wtmpart，改名后 tempName 即正式名） */
+        async function getFileBlob(dir, task) {
+            const plan = await loadPlan(task);
+            if (!plan) return null;
+            try {
+                const fh = await dir.getFileHandle(plan.tempName);
+                return await fh.getFile();
+            } catch { return null; }
+        }
+        return { ensurePerm, loadPlan, openPlan, hasPlan, closeWriter, writeAt, planOffset, finalize, dropLocalFile, getFileBlob, tempSuffix };
     })();
 
     /* ==================== 设置 & 任务持久化 ==================== */
@@ -326,7 +465,7 @@
         sanitizeName: true,  // 文件名跨平台自动修正（默认开）：净化 Windows/macOS/Linux/Android 非法字符与保留名，避免无法直接保存
     };
     let settings = Object.assign({}, DEFAULT_SETTINGS);
-    const SCRIPT_VER = "2.7.1";
+    const SCRIPT_VER = "2.8.0";
     // 诊断日志：始终记入环形缓冲（dlog.buf，最近 500 条）供面板一键复制；settings.debug 只控制是否同步打到 F12 控制台
     function dlog(...args) {
         try {
@@ -527,7 +666,7 @@
             task.singleBlob = true;
             if (blob.size > 0) await Store.putChunk(task.id, 0, blob, blob.size);
         }
-        if (!task.resumable && !task.singleBlob) {
+        if (!task.resumable && !task.singleBlob && !task.workingFile) {
             // 探测失败退回 HEAD
             try {
                 const hr = await gxhr(rt, { method: "HEAD", url: task.url, headers: refHeader(task), timeout: 20000 });
@@ -546,6 +685,15 @@
             task.chunkSize = task.totalSize || Infinity;
             task.totalChunks = 1;
         }
+        // 已授权保存文件夹：直写本地文件——先建占位文件，分片 seek 落盘，不经 IndexedDB；失败自动回退缓存模式
+        if (dirHandle && !task.singleBlob && task.resumable && task.totalSize > 0) {
+            try { const plan = await LocalFile.openPlan(dirHandle, task); if (plan) { await LocalFile.closeWriter(plan); dlog("planFile 直写本地", task.name, "总大小 " + task.totalSize); } } catch (e) { task.workingFile = false; dlog("planFile 直写不可用", e && e.message); }
+        }
+        if (!task.workingFile && task.singleBlob && task.totalSize > 0) {
+            // 回退场景：此前直写过但本次降级缓存，旧登记作废
+            await Store.clearPlans(task.id);
+            task.workingFile = false;
+        }
         task.planned = true;
     }
 
@@ -553,12 +701,18 @@
         if (!rt.segments) rt.segments = (await loadManifest(task.url, task.referer, 0, rt)).segments.map(s => s.url);
         const count = rt.segments.length;
         if (task.totalChunks !== count) {
-            // 分片数变化（如直播/列表更新），旧缓存作废
+            // 分片数变化（如直播/列表更新），旧缓存/旧直写文件作废
             await Store.clearChunks(task.id);
+            if (task.workingFile) { try { await LocalFile.dropLocalFile(dirHandle, task, "分片列表变化"); } catch { } }
             task.downloaded = 0;
             task.doneCount = 0;
             task.totalChunks = count;
+            task.bytesOffset = 0;
         }
+        if (!task.workingFile && dirHandle) {
+            try { const plan = await LocalFile.openPlan(dirHandle, task); if (plan) { await LocalFile.closeWriter(plan); dlog("planM3U8 直写本地", task.name, count + " 分片"); } } catch (e) { task.workingFile = false; dlog("planM3U8 直写不可用", e && e.message); }
+        }
+        if (!task.workingFile && task.totalChunks === count) await Store.clearPlans(task.id); // 缓存模式下清除残留登记
         task.totalSize = 0;
         task.chunkSize = 1;
         task.resumable = true;
@@ -580,7 +734,7 @@
                 r = await xhrWithHandle(rt, { method: "GET", url: rt.segments[i], responseType: "arraybuffer", headers: h });
             }
             if (r.status < 200 || r.status >= 400) { dlog("分片失败", i, "HTTP " + r.status, "referer=" + (task.referer || "无")); throw new Error("HTTP " + r.status); }
-            return new Blob([r.response], { type: "video/mp2t" });
+            return new Uint8Array(r.response);
         }
         const headers = refHeader(task);
         let expect = 200;
@@ -603,7 +757,25 @@
         }
         if (r.status !== expect) { dlog("文件分片失败", i, "HTTP " + r.status, "referer=" + (task.referer || "无")); throw new Error("HTTP " + r.status + (task.resumable ? "（Range 失效？可用「换址」重试）" : "")); }
         if (!r.response || (task.totalSize > 0 && r.response.byteLength === 0)) throw new Error("空响应");
-        return new Blob([r.response]);
+        return new Uint8Array(r.response);
+    }
+
+    /* ---- 分片落地：直写本地文件优先（登记成功才算完成），否则入 IDB 缓存 ---- */
+    async function storeChunk(task, i, bytes, size) {
+        if (task.workingFile) {
+            try {
+                const plan = await LocalFile.loadPlan(task);
+                if (!plan) throw Object.assign(new Error("计划丢失"), { drop: true });
+                await LocalFile.writeAt(plan, LocalFile.planOffset(plan, task, i), bytes, size, i);
+            } catch (e) {
+                await LocalFile.dropLocalFile(dirHandle, task, (e && e.name === "NotFoundError") ? "本地文件已被删除" : "直写失败");
+                await Store.clearChunks(task.id); // 残留旧分片不可信，作废后全量走缓存模式
+                task.planned = false;              // 重新规划（回退块大小/分片数），本块重新下载
+                throw e;
+            }
+            return;
+        }
+        await Store.putChunk(task.id, i, new Blob([bytes]), size);
     }
 
     async function worker(rt, task) {
@@ -613,9 +785,10 @@
             let ok = false, lastErr = null;
             for (let a = 0; a < 3 && !rt.abort; a++) {
                 try {
-                    const blob = await fetchChunk(task, i, rt);
-                    await Store.putChunk(task.id, i, blob, blob.size);
-                    task.downloaded += blob.size;
+                    const bytes = await fetchChunk(task, i, rt);
+                    const size = bytes.byteLength;
+                    await storeChunk(task, i, bytes, size);
+                    task.downloaded += size;
                     task.doneCount = (task.doneCount || 0) + 1;
                     touch(task);
                     if (!flushProgress(task)) saveTasks();
@@ -631,8 +804,21 @@
         }
     }
 
-    /* ---- 合并成品 ---- */
+    /* ---- 完成收尾：直写模式文件已在磁盘只需改名；缓存模式合并分片入库 ---- */
     async function mergeFinish(task, rt) {
+        if (task.workingFile) {
+            // 直写收尾：全部分片已落盘，关闭写流 + 改名成品即完成，零内存合并
+            setStatus(task, "merging");
+            if (rt && rt.abort) { setStatus(task, "paused"); return; }
+            const f = await LocalFile.finalize(dirHandle, task);
+            if (!f) throw new Error("本地文件计划丢失，请点击「继续」重新下载");
+            task.finalSize = f.size;
+            task.name = f.name; // 改名冲突加了序号时同步显示
+            setStatus(task, "done");
+            mgmapi.message(`下载完成：${task.name}（已直接保存在文件夹「${dirHandle ? dirHandle.name : "本地"}」）`);
+            if (task.mp4 && tsLike(task)) startConvert(task.id); // 转封装完成后由 finishConvert 按 autoSave 另存 MP4
+            return;
+        }
         setStatus(task, "merging");
         const parts = [];
         for (let i = 0; i < task.totalChunks; i++) {
@@ -668,7 +854,7 @@
         // 心跳：向其它标签页证明“这个任务由本页在跑”，避免重复下载
         task.owner = PAGE_ID;
         task.ownerTs = Date.now();
-        task.origin = task.origin || location.origin; // 分片缓存存在当前域名 IndexedDB，跨域站点的缓存不互通
+        task.origin = task.origin || location.origin; // 下载缓存（IDB 分片或本地直写登记）存在当前域名，跨域站点的缓存不互通
         rt.hb = setInterval(() => { task.ownerTs = Date.now(); saveTasks(); }, 3000);
         notifyUI();
         try {
@@ -678,20 +864,33 @@
                 await planFile(task, rt);
             }
             // 探测/解析阶段被暂停：作废可能不完美的计划，立即归位
-            if (rt.abort) { task.planned = false; setStatus(task, "paused"); return; }
-            const dm = await Store.doneMap(task.id);
-            let bad = false;
-            for (const idx of dm.keys()) if (idx >= task.totalChunks) { bad = true; break; }
-            if (bad) { await Store.clearChunks(task.id); dm.clear(); }
-            let downloaded = 0, doneCount = 0;
-            for (const [, size] of dm) { downloaded += size; doneCount++; }
+            if (rt.abort) { if (task.workingFile) { const p0 = await LocalFile.loadPlan(task); await LocalFile.closeWriter(p0); } task.planned = false; setStatus(task, "paused"); return; }
+            let doneIdx = new Set(), downloaded = 0, doneCount = 0;
+            if (task.workingFile) {
+                // 直写模式：完成分片靠 fileplan 登记重建，已写字节仍在磁盘上
+                const plan = await LocalFile.loadPlan(task);
+                if (!plan) { task.workingFile = false; task.planned = false; }
+                else {
+                    await LocalFile.closeWriter(plan); // 丢弃旧写流，重新打开
+                    for (const [idx, sz] of plan.pairs) { doneIdx.add(idx); downloaded += sz; }
+                    doneCount = plan.pairs.length;
+                }
+            }
+            if (!task.workingFile) {
+                const dm = await Store.doneMap(task.id);
+                let bad = false;
+                for (const idx of dm.keys()) if (idx >= task.totalChunks) { bad = true; break; }
+                if (bad) { await Store.clearChunks(task.id); dm.clear(); }
+                for (const [idx, size] of dm) { downloaded += size; doneCount++; doneIdx.add(idx); }
+            }
             task.downloaded = downloaded;
             task.doneCount = doneCount;
+            task.bytesOffset = downloaded;
             const queue = [];
-            for (let i = 0; i < task.totalChunks; i++) if (!dm.has(i)) queue.push(i);
+            for (let i = 0; i < task.totalChunks; i++) if (!doneIdx.has(i)) queue.push(i);
             rt.queue = queue;
-            // 断点续传可视化：明确告知复用了多少缓存分片
-            if (dm.size && queue.length) mgmapi.message(`断点续传：复用 ${dm.size} 个已缓存分片，待补 ${queue.length} 个`, 4000);
+            // 断点续传可视化：明确告知复用了多少已下载分片
+            if (doneIdx.size && queue.length) mgmapi.message(`断点续传：复用 ${doneIdx.size} 个已下载分片（${task.workingFile ? "本地文件直写" : "浏览器缓存"}），待补 ${queue.length} 个`, 4000);
             saveTasks();
             const threads = (task.type === "file" && !task.resumable) ? 1 : (task.threads > 0 ? task.threads : settings.threads); // 任务级线程数优先
             if (queue.length) {
@@ -894,6 +1093,7 @@
             totalSize: 0, chunkSize: 0, totalChunks: 0,
             downloaded: 0, doneCount: 0,
             planned: false, resumable: false, singleBlob: false,
+            workingFile: false, bytesOffset: 0, // 直写本地文件模式：成品临时名 + 已写字节偏移
             mime: "", error: "",
             addedAt: Date.now(), finishedAt: 0, finalSize: 0,
         };
@@ -948,14 +1148,15 @@
         if (remote) sendCmd(id, "delete");
         deletedTs.set(id, Date.now()); // 墓碑：所有标签页同步删除
         tasks = tasks.filter(x => x.id !== id);
-        try { await Store.clearChunks(id); await Store.deleteFile(id); await Store.deleteFile("mp4:" + id); } catch { }
+        try { await Store.clearChunks(t.id); await Store.clearPlans(t.id); } catch { }
+        try { await Store.deleteFile(id); await Store.deleteFile("mp4:" + id); if (t.workingFile && dirHandle) await LocalFile.dropLocalFile(dirHandle, t, "任务删除"); } catch { }
         await saveTasksNow();
         notifyUI();
         schedule();
     }
 
     /* 应用地址变更（不判断远程/本地） */
-    function applyUrlChange(t, newUrl) {
+    async function applyUrlChange(t, newUrl) {
         const urlChanged = t.url !== newUrl;
         t.url = newUrl;
         if (t.type === "file" && urlChanged) {
@@ -963,6 +1164,7 @@
                 // 整包单分片模式：换址后旧分片不再有效，清空重下
                 Store.clearChunks(t.id).then(() => { t.downloaded = 0; t.doneCount = 0; saveTasks(); notifyUI(); });
             }
+            if (t.workingFile) { try { await LocalFile.dropLocalFile(dirHandle, t, "更换地址"); } catch { } }
             // 直链过期换新：保留已完成分片，重新探测大小后从断点继续
             t.planned = false;
             t.singleBlob = false;
@@ -996,7 +1198,21 @@
         const t = findTask(id);
         if (!t) return;
         let rec = await Store.getFile(t.id);
-        if (!rec || !rec.blob) throw new Error("成品文件在主域不存在，请在统一主页重新下载");
+        if (!rec || !rec.blob) {
+            // 直写本地模式：成品已在授权文件夹里，无需重复另存
+            if (t.workingFile && dirHandle) {
+                try {
+                    const plan = await LocalFile.loadPlan(t);
+                    if (plan && plan.status === "done") {
+                        if (t.status !== "done") { t.status = "done"; t.finalSize = plan.finalSize || t.finalSize || 0; touch(t); }
+                        t.name = plan.finalName || plan.tempName; saveTasks(); notifyUI();
+                        mgmapi.message(`已保存在文件夹「${dirHandle.name}」：${t.name}`);
+                        return { key: t.id, name: t.name, size: t.finalSize };
+                    }
+                } catch (e) { dlog("saveAs 本地成品检测失败", e && e.message); }
+            }
+            throw new Error("成品文件不存在，请在统一主页重新下载");
+        }
         if (t.mp4) { // 已转封装：另存直接用 MP4 成品
             const mrec = await Store.getFile("mp4:" + t.id);
             if (mrec && mrec.blob) rec = { key: mrec.key, blob: mrec.blob, name: mp4Name(t), size: mrec.size, ts: mrec.ts };
@@ -1062,7 +1278,7 @@
   }
   function idb(mode, fn) {
     return new Promise(function (res, rej) {
-      var rq = indexedDB.open("wtm-downloader");
+      var rq = indexedDB.open("wtm-downloader", 3);
       rq.onupgradeneeded = function () { var d = rq.result; if (!d.objectStoreNames.contains("files")) d.createObjectStore("files", { keyPath: "key" }); };
       rq.onerror = function () { rej(rq.error); };
       rq.onsuccess = function () {
@@ -1076,10 +1292,14 @@
     var d = ev.data;
     if (!d || d.wtm !== "mp4-convert") return;
     var id = d.taskId;
-    idb("readonly", function (st, res, rej) { var g = st.get(id); g.onsuccess = function () { res(g.result); }; g.onerror = function () { rej(g.error); }; })
-      .then(function (rec) {
-        if (!rec || !rec.blob) throw new Error("找不到合并成品");
-        return rec.blob.arrayBuffer();
+    Promise.resolve()
+      .then(function () {
+        if (d.bytes && d.bytes.byteLength) return d.bytes; // 直写本地模式：主页已从磁盘读好成品字节，不经 IndexedDB
+        return idb("readonly", function (st, res, rej) { var g = st.get(id); g.onsuccess = function () { res(g.result); }; g.onerror = function () { rej(g.error); }; })
+          .then(function (rec) {
+            if (!rec || !rec.blob) throw new Error("找不到合并成品");
+            return rec.blob.arrayBuffer();
+          });
       })
       .then(function (buf) {
         return getFFmpeg().then(function (ff) {
@@ -1090,6 +1310,7 @@
       })
       .then(function (out) {
         var blob = out instanceof Blob ? out : new Blob([out], { type: "video/mp4" });
+        if (d.bytes) { post({ taskId: id, ok: true, size: blob.size, local: true, bytes: blob }); return Promise.resolve(); } // 直写模式：成品回传给主页直接落盘，不存 IDB 副本
         return idb("readwrite", function (st, res, rej) {
           var p = st.put({ key: "mp4:" + id, blob: blob, size: blob.size, ts: Date.now() });
           p.onsuccess = function () { res(); }; p.onerror = function () { rej(p.error); };
@@ -1123,6 +1344,13 @@
         touch(t); saveTasksNow(); notifyUI();
         mgmapi.message("MP4 转换中（无损重封装，首次需联网加载组件）…", 6000);
         ensurePageConverter().then(() => {
+            if (t.workingFile && dirHandle) {
+                // 直写模式：成品在磁盘上，读出字节后直接交给转换器（不经 IndexedDB）
+                return LocalFile.getFileBlob(dirHandle, t).then(f => {
+                    if (!f) throw new Error("本地成品文件不存在，可能被移动或删除");
+                    return f.arrayBuffer().then(buf => { postMessage({ wtm: "mp4-convert", taskId: id, bytes: buf }, "*"); });
+                });
+            }
             postMessage({ wtm: "mp4-convert", taskId: id }, "*");
         }).catch(e => finishConvert(id, false, { error: e.message }));
     }
@@ -1134,6 +1362,22 @@
         t.converting = false;
         if (ok) { t.mp4 = true; t.mp4Size = (info && info.size) || 0; }
         else { t.mp4 = false; t.mp4Error = (info && info.error) || "转换失败"; }
+        if (ok && info && info.local && info.bytes && dirHandle) {
+            // 直写模式：MP4 成品直接写入授权文件夹（同名自动加序号），并清理源 TS
+            try {
+                await LocalFile.ensurePerm(dirHandle);
+                const mp4FileName = mp4Name(t);
+                const fh = await dirHandle.getFileHandle(mp4FileName, { create: true });
+                const w = await fh.createWritable();
+                await w.write(info.bytes instanceof Blob ? info.bytes : new Blob([info.bytes]));
+                await w.close();
+                t.finalSize = (info && info.size) || t.finalSize;
+                try { await dirHandle.removeEntry(t.name); } catch { } // 源 TS 已由 MP4 取代
+                const plan = await LocalFile.loadPlan(t);
+                if (plan) { plan.tempName = mp4FileName; plan.finalSize = t.finalSize; await Store.putPlan({ key: `${t.id}:f`, taskId: t.id, plan }); } // 后续另存/删除指向 MP4 成品
+                dlog("MP4 直写完成", mp4FileName);
+            } catch (e) { console.warn("[wtm] MP4 直写失败，回退另存", e); }
+        }
         touch(t); await saveTasksNow(); notifyUI();
         if (ok) {
             mgmapi.message(`已转成 MP4（${fmtSize(t.mp4Size)}）：${mp4Name(t)}`);
@@ -1403,7 +1647,7 @@
           <div class="crow"><span class="clb">线程数</span><input type="number" id="cf-threads" min="1" max="8" style="flex:none;width:72px"><span class="clb" style="width:auto">立即开始</span><input type="checkbox" id="cf-now"></div>
           <div class="crow"><span class="clb" style="width:auto"><input type="checkbox" id="cf-mp4"> 完成后转 MP4</span><span class="cnote" style="margin-top:0">无损重封装（-c copy）；首次使用联网加载组件，失败不影响 TS 成品</span></div>
           <div class="crow"><span class="clb" style="width:auto"><input type="checkbox" id="cf-sanitize"> 文件名跨平台自动修正</span><span class="cnote" style="margin-top:0">取消则按原名保存（可能含目标系统非法字符无法保存）</span></div>
-          <div class="cnote">超过并发数的任务会自动排队；取消勾选「立即开始」则放入暂停列表，稍后手动继续。「更改文件夹」在本页直接打开选择器（需 Chrome/Edge，https 页面），授权后保存不再弹框直接写入；注意浏览器禁止直接选中「下载/桌面/文稿」本身，请在其中建子文件夹再选。</div>
+          <div class="cnote">超过并发数的任务会自动排队；取消勾选「立即开始」则放入暂停列表，稍后手动继续。「更改文件夹」在本页直接打开选择器（需 Chrome/Edge，https 页面）：在主页授权后新任务分片直接写入该文件夹（先建占位文件、边下边写、完成改名，不占浏览器缓存）；注意浏览器禁止直接选中「下载/桌面/文稿」本身，请在其中建子文件夹再选。</div>
           <div class="cfoot"><button class="btn ghost" data-act="cf-cancel">取消</button><button class="btn primary" data-act="cf-ok">开始下载</button></div>
         </div>
       </div>`;
@@ -1616,8 +1860,8 @@
     function updateConfirmDirText() {
         if (!els.cfDir) return;
         els.cfDir.textContent = settings.saveDirName
-            ? `📁 ${settings.saveDirName}（完成后自动保存到此文件夹）`
-            : "浏览器下载目录（可点右侧「更改文件夹」授权固定目录）";
+            ? `📁 ${settings.saveDirName}（下载到本地时直接写入此文件夹）`
+            : "浏览器下载目录（可点右侧「更改文件夹」授权固定目录，授权后分片直接写入本地文件、不占浏览器缓存）";
     }
     async function pickSaveDir() {
         if (!window.showDirectoryPicker) { mgmapi.message("当前页面不支持文件夹选择（需 Chrome/Edge 且为 https 安全上下文），将使用浏览器下载目录"); return; }
@@ -1633,7 +1877,7 @@
             if (els.sDirName) els.sDirName.textContent = h.name;
             mgmapi.message(isEngine()
                 ? `已指定保存文件夹：${h.name}`
-                : `已选择文件夹「${h.name}」（名称已同步各页面）。实际写入由统一主页执行，浏览器不允许文件夹权限跨站携带：要在主页也静默写入这个目录，请在主页标签里选一次同一文件夹`, 12000);
+                : `已选择文件夹「${h.name}」（名称已同步各页面）。分片直写仅在执行下载的引擎页生效，浏览器不允许文件夹权限跨站携带：要在主页直写这个目录，请在主页标签里选一次同一文件夹`, 12000);
         } catch (e) {
             if (e && (e.name === "AbortError" || (e.name === "NotAllowedError" && /permission is denied|denied by the user/i.test(e.message || "")))) return; // 用户主动取消，不打扰
             // Chrome 安全策略（规范明文，跨平台一致）：禁止直接选中 下载/文稿/桌面/主目录 本身，哪怕完全空也报“含系统文件”；其子文件夹允许

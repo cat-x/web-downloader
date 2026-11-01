@@ -229,7 +229,47 @@ await ok("更改文件夹就地打开选择器，不再跳转主页标签", () =
     assert.ok(!/isEngine\(\)/.test(guardPart), "非引擎页也应能直接打开选择器（无拦截）");
     assert.ok(/showDirectoryPicker\(\{/.test(body), "应直接调用原生文件夹选择器");
     assert.ok(/Store\.setMeta\("savedir", h\)/.test(body), "句柄应存于选择所在域的 IndexedDB");
-    assert.ok(/isEngine\(\)[\s\S]*已指定保存文件夹[\s\S]*静默写入/.test(body), "非主页应提示跨站权限限制");
+    assert.ok(/isEngine\(\)[\s\S]*已指定保存文件夹[\s\S]*跨站携带/.test(body), "非主页应提示跨站权限限制");
+});
+
+console.log("[分片直写本地文件]");
+await ok("直写模式接线：登记驱动续传、零内存收尾、全局回退与清理", () => {
+    assert.ok(/indexedDB\.open\("wtm-downloader", 3\)/.test(src), "库版本应升到 3");
+    assert.ok(/objectStoreNames\.contains\("fileplan"\)/.test(src), "应有 fileplan 登记库");
+    assert.ok(/putPlan\(rec\)/.test(src) && /getPlan\(key\)/.test(src) && /clearPlans\(taskId\)/.test(src), "Store 应提供计划读写/清理");
+    const w = sliceFn("worker");
+    assert.ok(/await storeChunk\(task, i, bytes, size\)/.test(w), "worker 应经 storeChunk 分流落地");
+    assert.ok(!/Store\.putChunk/.test(w), "worker 不再直接写分片缓存");
+    const sc = sliceFn("storeChunk");
+    assert.ok(/LocalFile\.writeAt\(plan, LocalFile\.planOffset\(plan, task, i\), bytes, size, i\)/.test(sc), "直写分支按偏移 seek 落盘");
+    assert.ok(/dropLocalFile/.test(sc) && /clearChunks/.test(sc) && /planned = false/.test(sc), "写盘失败应降级回缓存模式并作废旧登记");
+    const pf = sliceFn("planFile");
+    assert.ok(/dirHandle && !task\.singleBlob && task\.resumable && task\.totalSize > 0/.test(pf), "授权目录+可续传才启用直写");
+    assert.ok(/singleBlob && task\.totalSize > 0/.test(pf), "直写降级后不应误入整包单分片模式");
+    const pm = sliceFn("planM3U8");
+    assert.ok(/dropLocalFile\(dirHandle, task, "分片列表变化"\)/.test(pm), "m3u8 分片数变化应丢弃旧直写文件");
+    const rn = sliceFn("run");
+    assert.ok(/for \(const \[idx, sz\] of plan\.pairs\)/.test(rn), "续传应靠 fileplan 登记重建完成分片");
+    assert.ok(/closeWriter\(plan\)/.test(rn), "接管前应丢弃旧写流重新打开");
+    const mf = sliceFn("mergeFinish");
+    const directBranch = mf.split("if (task.workingFile)")[1].split("return;")[0];
+    assert.ok(directBranch.length > 50 && directBranch.indexOf("Store.getChunk") === -1 && directBranch.indexOf("putFile") === -1, "直写收尾不得读分片合并入库");
+    assert.ok(/LocalFile\.finalize\(dirHandle, task\)/.test(mf), "直写完成只改名");
+    assert.ok(/clearPlans\(t\.id\)/.test(sliceFn("removeTask")), "删任务应清直写登记");
+    assert.ok(/dropLocalFile\(dirHandle, t, "更换地址"\)/.test(sliceFn("applyUrlChange")), "换址应丢弃旧直写文件");
+    const sa = sliceFn("saveAsInternal");
+    assert.ok(/plan && plan\.status === "done"/.test(sa) && /已保存在文件夹/.test(sa), "成品已在本地时不应报不存在");
+    assert.ok(/wtm: "mp4-convert", taskId: id, bytes: buf/.test(sliceFn("startConvert")), "直写成品转封装走字节传递不经 IDB");
+    assert.ok(/if \(d\.bytes && d\.bytes\.byteLength\) return d\.bytes/.test(src), "页世界转换器支持字节输入");
+    assert.ok(/info\.local && info\.bytes && dirHandle/.test(sliceFn("finishConvert")), "MP4 成品直写本地文件夹");
+});
+await ok("planOffset：直链按块大小定位，m3u8 按已登记分片累计追加", () => {
+    const m = src.match(/function planOffset\(plan, task, i\) \{[\s\S]*?\n        \}/);
+    assert.ok(m, "应存在 planOffset");
+    const fn = new Function("return " + m[0])();
+    const plan = { pairs: [[0, 100], [2, 50]] };
+    assert.strictEqual(fn(plan, { resumable: true, type: "file", chunkSize: 4096 }, 3), 3 * 4096, "直链分片偏移=索引×块大小");
+    assert.strictEqual(fn(plan, { resumable: true, type: "m3u8" }, 3), 150, "m3u8 顺序追加偏移=已登记字节和");
 });
 
 console.log("[动态文件名取名]");
