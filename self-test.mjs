@@ -238,10 +238,11 @@ await ok("直写模式接线：登记驱动续传、零内存收尾、全局回�
     assert.ok(/objectStoreNames\.contains\("fileplan"\)/.test(src), "应有 fileplan 登记库");
     assert.ok(/putPlan\(rec\)/.test(src) && /getPlan\(key\)/.test(src) && /clearPlans\(taskId\)/.test(src), "Store 应提供计划读写/清理");
     const w = sliceFn("worker");
-    assert.ok(/await storeChunk\(task, i, bytes, size\)/.test(w), "worker 应经 storeChunk 分流落地");
+    assert.ok(/await storeChunk\(task, i, bytes, size, rt\)/.test(w), "worker 应经 storeChunk 分流落地（携 rt供 m3u8 顺序刷盘）");
     assert.ok(!/Store\.putChunk/.test(w), "worker 不再直接写分片缓存");
     const sc = sliceFn("storeChunk");
-    assert.ok(/LocalFile\.writeAt\(plan, LocalFile\.planOffset\(plan, task, i\), bytes, size, i\)/.test(sc), "直写分支按偏移 seek 落盘");
+    assert.ok(/LocalFile\.writeAt\(task\.id, plan, LocalFile\.planOffset\(plan, task, i\), bytes, size, i\)/.test(sc), "直链直写分支按块偏移 seek 落盘");
+    assert.ok(/task\.type === "m3u8"[\s\S]*rt\.wbuf\.set\(i, bytes\)[\s\S]*while \(rt\.wbuf\.has\(rt\.nextWrite\)\)/.test(sc), "m3u8 分片入缓冲按索引顺序刷盘（防并发乱序串位）");
     assert.ok(/dropLocalFile/.test(sc) && /clearChunks/.test(sc) && /planned = false/.test(sc), "写盘失败应降级回缓存模式并作废旧登记");
     const pf = sliceFn("planFile");
     assert.ok(/dirHandle && !task\.singleBlob && task\.resumable && task\.totalSize > 0/.test(pf), "授权目录+可续传才启用直写");
@@ -250,7 +251,7 @@ await ok("直写模式接线：登记驱动续传、零内存收尾、全局回�
     assert.ok(/dropLocalFile\(dirHandle, task, "分片列表变化"\)/.test(pm), "m3u8 分片数变化应丢弃旧直写文件");
     const rn = sliceFn("run");
     assert.ok(/for \(const \[idx, sz\] of plan\.pairs\)/.test(rn), "续传应靠 fileplan 登记重建完成分片");
-    assert.ok(/closeWriter\(plan\)/.test(rn), "接管前应丢弃旧写流重新打开");
+    assert.ok(/closeWriter\(task\.id\)/.test(rn), "接管前应丢弃旧写流、后续从 handle 重开");
     const mf = sliceFn("mergeFinish");
     const directBranch = mf.split("if (task.workingFile)")[1].split("return;")[0];
     assert.ok(directBranch.length > 50 && directBranch.indexOf("Store.getChunk") === -1 && directBranch.indexOf("putFile") === -1, "直写收尾不得读分片合并入库");
@@ -270,6 +271,31 @@ await ok("planOffset：直链按块大小定位，m3u8 按已登记分片累计�
     const plan = { pairs: [[0, 100], [2, 50]] };
     assert.strictEqual(fn(plan, { resumable: true, type: "file", chunkSize: 4096 }, 3), 3 * 4096, "直链分片偏移=索引×块大小");
     assert.strictEqual(fn(plan, { resumable: true, type: "m3u8" }, 3), 150, "m3u8 顺序追加偏移=已登记字节和");
+});
+
+console.log("[直写写流不入 IDB（修复 v2.8.0 隐性失效）]");
+await ok("写流不可克隆：writer 存内存 Map，持久化计划只含 handle + taskId", () => {
+    assert.ok(/const writers = new Map\(\)/.test(src), "应有内存级 writers Map");
+    const op = src.match(/async function openPlan\(dir, task\) \{[\s\S]*?\n        \}/);
+    assert.ok(op, "应存在 openPlan");
+    assert.ok(!/plan\.writer\s*=/.test(op[0]), "openPlan 不得把写流挂到 plan 上");
+    assert.ok(/plan\.handle = await dir\.getFileHandle\(plan\.tempName\)/.test(op[0]), "openPlan 只保留可克隆的文件句柄");
+    assert.ok(/taskId: task\.id/.test(op[0]), "计划应携带 taskId（否则登记键会变成 undefined）");
+    assert.ok(/putPlan\(\{ key: planKey\(task\.id, "f"\), taskId: task\.id, plan \}\)/.test(op[0]), "持久化时写流不在 plan 内，不会抛 DataCloneError");
+    const wa = src.match(/async function writeAt\(taskId, plan, offset, bytes, size, index\) \{[\s\S]*?\n        \}/);
+    assert.ok(wa, "writeAt 应改为以 taskId 取写流");
+    assert.ok(/getWriter\(taskId, plan\)/.test(wa[0]) && /await w\.seek\(offset\)/.test(wa[0]), "writeAt 从 writers 取流并 seek 写");
+    assert.ok(!/Store\.putChunk|plan\.writer/.test(wa[0]), "writeAt 不再引用不可克隆的 plan.writer");
+});
+
+console.log("[m3u8 直写顺序修复]");
+await ok("planM3U8：先置 resumable/chunkSize/name 再 openPlan（旧顺序导致 m3u8 直写从不激活）", () => {
+    const pm = sliceFn("planM3U8");
+    const openAt = pm.indexOf("LocalFile.openPlan");
+    const resumAt = pm.indexOf('task.resumable = true');
+    const nameAt = pm.indexOf('ensureExt(task.name, ".ts")');
+    assert.ok(openAt > 0 && resumAt > 0 && nameAt > 0 && resumAt < openAt && nameAt < openAt, "resumable 与 name 必须在 openPlan 之前就绪");
+    assert.ok(/rt\.nextWrite = 0; while \(doneIdx\.has\(rt\.nextWrite\)\)/.test(sliceFn("run")), "续传时 m3u8 从第一个未完成分片接着刷盘");
 });
 
 console.log("[动态文件名取名]");
